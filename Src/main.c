@@ -230,6 +230,7 @@ an settings option)
 #include "signal.h"
 #include "sounds.h"
 #include "targets.h"
+#include "ui.h"
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
@@ -1641,6 +1642,10 @@ int main(void)
 
     initCorePeripherals();
 
+#ifdef USE_BUTTON_UI
+    ui_init();
+#endif
+
     enableCorePeripherals();
 
     loadEEpromSettings();
@@ -1749,10 +1754,16 @@ int main(void)
 #else
     // checkForHighSignal();     // will reboot if signal line is high for 10ms
 
+#ifdef USE_BUTTON_UI
+    inputSet = 1;
+    drive_by_rpm = 1;
+    use_speed_control_loop = 1;
+#else
     receiveDshotDma();
     if (drive_by_rpm) {
         use_speed_control_loop = 1;
     }
+#endif
 #endif
 
 #endif // end fixed duty mode ifdef
@@ -1798,10 +1809,14 @@ if(zero_crosses < 5){
 	  min_bemf_counts_up = TARGET_MIN_BEMF_COUNTS * 2;
 		min_bemf_counts_down = TARGET_MIN_BEMF_COUNTS * 2;
 }else{
-	 min_bemf_counts_up = TARGET_MIN_BEMF_COUNTS;
+        min_bemf_counts_up = TARGET_MIN_BEMF_COUNTS;
 	min_bemf_counts_down = TARGET_MIN_BEMF_COUNTS;
 }
         RELOAD_WATCHDOG_COUNTER();
+
+#ifdef USE_BUTTON_UI
+        ui_update();
+#endif
 
         if (eepromBuffer.variable_pwm == 1) {      // uses range defined by pwm frequency setting
             tim1_arr = map(commutation_interval, 96, 200, TIMER1_MAX_ARR / 2,
@@ -1818,6 +1833,7 @@ if(zero_crosses < 5){
               tim1_arr = 250 * (CPU_FREQUENCY_MHZ/9);
           } 
         }
+#ifndef USE_BUTTON_UI
         if (signaltimeout > (LOOP_FREQUENCY_HZ >> 1)) { // half second timeout when armed;
             if (armed) {
                 allOff();
@@ -1846,6 +1862,7 @@ if(zero_crosses < 5){
                 NVIC_SystemReset();
             }
         }
+#endif
 #ifdef USE_CUSTOM_LED
         if ((input >= 47) && (input < 1947)) {
             if (ledcounter > (2000 >> forward)) {
