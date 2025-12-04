@@ -7,6 +7,7 @@
 #include "functions.h"
 #include "main.h"
 #include "targets.h"
+#include <stdio.h>
 
 #define UI_BAT_V_ON_PORT GPIOB
 #define UI_BAT_V_ON_PIN GPIO_Pin_12
@@ -132,10 +133,12 @@ static void ui_configure_gpio(void);
 static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin);
 static void ui_log_button_event(const char* origin, const char* name, const char* event);
 static void ui_log_gpio_button(ui_gpio_button_t* btn, const char* name, uint8_t pressed);
+static void ui_log_context(void);
 static void ui_init_button_module(void);
 static uint16_t ui_rpm_to_input(uint32_t rpm);
 static void ui_apply_target(void);
 static void ui_start_motor(void);
+static void ui_on_power_short_running(void);
 static void ui_stop_motor(void);
 static void ui_update_soc_and_leds(void);
 static void ui_drive_leds(uint8_t soc, uint8_t charging, uint8_t blink_on);
@@ -155,7 +158,7 @@ static void ui_btn_dec_down(void);
 static void ui_btn_dec_up(void);
 static void ui_btn_dec_short(void);
 
-__attribute__((weak)) void ui_on_power_short_running(void) { }
+// __attribute__((weak)) void ui_on_power_short_running(void) { }
 __attribute__((weak)) void ui_on_increment_short_callback(void) { }
 __attribute__((weak)) void ui_on_decrement_short_callback(void) { }
 
@@ -178,11 +181,14 @@ void ui_init(void)
 
     ui_ctx.device_on = 0;
     ui_ctx.motor_requested = 0;
-    ui_ctx.target_rpm = MINIMUM_RPM_SPEED_CONTROL;
-    ui_ctx.last_nonzero_rpm = MINIMUM_RPM_SPEED_CONTROL;
+    ui_ctx.target_rpm = 0;
+    ui_ctx.last_nonzero_rpm = 0;
     ui_ctx.target_input = 0;
     ui_ctx.shutdown_ticks = 0;
     ui_ctx.last_tick_count = tenkhzcounter;
+
+    /* Seed target_rpm/target_input so UI-driven throttle is non-zero. */
+    ui_set_target_rpm(MINIMUM_RPM_SPEED_CONTROL);
 
     ui_init_button_module();
 }
@@ -219,6 +225,7 @@ void ui_request_shutdown(void)
 }
 
 uint16_t DebugCount1 = 0;
+static uint16_t ui_diag_tick_accum = 0;
 
 void ui_update(void)
 {
@@ -256,7 +263,11 @@ void ui_update(void)
 
     uint8_t dc_in_raw = ui_read_button(UI_DC_IN_PORT, UI_DC_IN_PIN);
 #if UI_DC_IN_ACTIVE_HIGH
+#ifndef DEBUG_UART_ENABLE
     uint8_t charging_now = dc_in_raw;
+#else
+    uint8_t charging_now = 0; /* UART USES CHARGING ACTIVE PIN. */
+#endif
 #else
     uint8_t charging_now = !dc_in_raw;
 #endif
@@ -292,6 +303,12 @@ void ui_update(void)
         ui_ctx.blink_on = !ui_ctx.blink_on;
     }
 
+    ui_diag_tick_accum++;
+    if (ui_diag_tick_accum >= UI_TICK_HZ) {
+        ui_diag_tick_accum = 0;
+        ui_log_context();
+    }
+
     ui_apply_target();
 }
 
@@ -305,8 +322,11 @@ static void ui_on_power_short(void)
 
     if (!ui_ctx.motor_requested) {
         ui_start_motor();
+        // debug_uart_write("Motor start trigger\r\n");
     } else {
+        ui_ctx.motor_requested = 0;
         ui_on_power_short_running();
+        // debug_uart_write("Motor stop trigger\r\n");
     }
 }
 
@@ -412,6 +432,29 @@ static void ui_log_gpio_button(ui_gpio_button_t* btn, const char* name, uint8_t 
         }
     } else {
         btn->debounce_ticks = 0;
+    }
+}
+
+static void ui_log_context(void)
+{
+    char buf[180];
+    int n = snprintf(buf, sizeof(buf),
+                     "UI ctx: dev=%u motor_req=%u charging=%u soc=%u blink=%u tgt_in=%u tgt_rpm=%lu last_rpm=%lu last_tick=%u bat_tick=%u blink_tick=%u shutdown=%u\r\n",
+                     (unsigned)ui_ctx.device_on,
+                     (unsigned)ui_ctx.motor_requested,
+                     (unsigned)ui_ctx.charging,
+                     (unsigned)ui_ctx.soc,
+                     (unsigned)ui_ctx.blink_on,
+                     (unsigned)ui_ctx.target_input,
+                     (unsigned long)ui_ctx.target_rpm,
+                     (unsigned long)ui_ctx.last_nonzero_rpm,
+                     (unsigned)ui_ctx.last_tick_count,
+                     (unsigned)ui_ctx.battery_tick_accum,
+                     (unsigned)ui_ctx.blink_tick_accum,
+                     (unsigned)ui_ctx.shutdown_ticks);
+    if (n > 0) {
+        buf[sizeof(buf) - 1] = '\0';
+        debug_uart_write(buf);
     }
 }
 
@@ -521,8 +564,9 @@ static void ui_start_motor(void)
     }
     ui_ctx.device_on = 1;
     ui_ctx.shutdown_ticks = 0;
-    if (ui_ctx.target_rpm == 0) {
-        ui_set_target_rpm(ui_ctx.last_nonzero_rpm ? ui_ctx.last_nonzero_rpm : MINIMUM_RPM_SPEED_CONTROL);
+    if ((ui_ctx.target_rpm == 0) || (ui_ctx.target_input == 0)) {
+        uint32_t rpm = ui_ctx.target_rpm ? ui_ctx.target_rpm : (ui_ctx.last_nonzero_rpm ? ui_ctx.last_nonzero_rpm : MINIMUM_RPM_SPEED_CONTROL);
+        ui_set_target_rpm(rpm);
     }
 
     drive_by_rpm = 1;
@@ -540,6 +584,12 @@ static void ui_start_motor(void)
     debug_uart_write("motor_start\r\n");
     ui_apply_target();
 }
+
+static void ui_on_power_short_running(void)
+{
+    ui_stop_motor();
+}
+
 
 static void ui_stop_motor(void)
 {
