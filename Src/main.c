@@ -1231,6 +1231,9 @@ void tenKhzRoutine()
     tenkhzcounter++;
     ledcounter++;
     one_khz_loop_counter++;
+#ifdef USE_BUTTON_UI
+    ui_light_tick_fast();
+#endif
     if (!armed) {
         if (cell_count == 0) {
             if (inputSet) {
@@ -1643,12 +1646,12 @@ int main(void)
 
     initCorePeripherals();
 
-#ifdef USE_BUTTON_UI
-    ui_init();
-#endif
 #ifdef DEBUG_UART_ENABLE
     debug_uart_init(19200);
     debug_uart_write("boot\r\n");
+#endif
+#ifdef USE_BUTTON_UI
+    ui_init();
 #endif
 
     enableCorePeripherals();

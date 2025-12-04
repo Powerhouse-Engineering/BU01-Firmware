@@ -12,6 +12,7 @@
 
 void ui_init(void);
 void ui_update(void);
+void ui_light_tick_fast(void);
 void ui_request_shutdown(void);
 void ui_set_target_rpm(uint32_t rpm);
 

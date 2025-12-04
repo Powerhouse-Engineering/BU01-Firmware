@@ -31,6 +31,9 @@
 #define UI_DC_IN_PORT GPIOC
 #define UI_DC_IN_PIN GPIO_Pin_13
 #define UI_DC_IN_ACTIVE_HIGH 1
+#define UI_CHG_DONE_PORT GPIOA
+#define UI_CHG_DONE_PIN GPIO_Pin_12
+#define UI_CHG_DONE_ACTIVE_LOW 1
 
 #define UI_TICK_HZ 100U
 #define UI_TICK_INTERVAL (LOOP_FREQUENCY_HZ / UI_TICK_HZ)
@@ -42,7 +45,7 @@
 #define UI_BLINK_PERIOD_TICKS (UI_TICK_HZ / 2U)
 #define UI_SOC_MIN_CV 330U  // 3.30V per cell shown as 330 (centivolts)
 #define UI_SOC_MAX_CV 420U  // 4.20V per cell shown as 420 (centivolts)
-#define UI_RPM_STEP 100U
+#define UI_RPM_STEP 600U
 
 extern uint8_t drive_by_rpm;
 extern char use_speed_control_loop;
@@ -61,6 +64,38 @@ extern uint32_t MINIMUM_RPM_SPEED_CONTROL;
 
 extern void setInput(void);
 
+typedef enum {
+    PRODUCT_IDLE = 0,
+    PRODUCT_POWER_ON,
+    PRODUCT_STANDBY,
+    PRODUCT_RUNNING,
+    PRODUCT_MODE_CHANGE,
+    PRODUCT_CHARGING,
+    PRODUCT_POWER_OFF,
+    PRODUCT_ERROR,
+} product_state_t;
+
+typedef enum {
+    CHARGE_NONE = 0,
+    CHARGE_CHARGING,
+    CHARGE_COMPLETE,
+    CHARGE_ERROR,
+} charging_state_t;
+
+typedef struct {
+    product_state_t Now;
+    product_state_t Prev;
+    uint32_t Counter;
+    bool Configured;
+} product_state_handle_t;
+
+typedef struct {
+    charging_state_t Now;
+    charging_state_t Prev;
+    uint32_t Counter;
+    bool Configured;
+} charging_state_handle_t;
+
 typedef struct {
     uint8_t stable_pressed;
     uint8_t debounce_ticks;
@@ -69,7 +104,7 @@ typedef struct {
 typedef struct {
     uint8_t device_on;
     uint8_t motor_requested;
-    uint8_t charging;
+    bool charging_present;
     uint8_t soc;
     uint8_t blink_on;
     uint16_t target_input;
@@ -79,15 +114,17 @@ typedef struct {
     uint16_t battery_tick_accum;
     uint16_t blink_tick_accum;
     uint16_t shutdown_ticks;
+    product_state_handle_t state;
+    charging_state_handle_t charging_state;
     ui_gpio_button_t power_btn;
     ui_gpio_button_t inc_btn;
     ui_gpio_button_t dec_btn;
-} ui_context_t;
+} product_context_t;
 
-static ui_context_t ui_ctx = {
+static product_context_t product = {
     .device_on = 0,
     .motor_requested = 0,
-    .charging = 0,
+    .charging_present = false,
     .soc = 0,
     .blink_on = 0,
     .target_input = 0,
@@ -97,6 +134,14 @@ static ui_context_t ui_ctx = {
     .battery_tick_accum = 0,
     .blink_tick_accum = 0,
     .shutdown_ticks = 0,
+    .state.Now = PRODUCT_POWER_ON,
+    .state.Prev = PRODUCT_POWER_ON,
+    .state.Counter = 0,
+    .state.Configured = false,
+    .charging_state.Now = CHARGE_NONE,
+    .charging_state.Prev = CHARGE_NONE,
+    .charging_state.Counter = 0,
+    .charging_state.Configured = false,
     .power_btn = { 0, 0 },
     .inc_btn = { 0, 0 },
     .dec_btn = { 0, 0 }
@@ -135,6 +180,11 @@ static void ui_log_button_event(const char* origin, const char* name, const char
 static void ui_log_gpio_button(ui_gpio_button_t* btn, const char* name, uint8_t pressed);
 static void ui_log_context(void);
 static void ui_init_button_module(void);
+static void product_state_step(bool charging_present, uint8_t charge_done);
+static void charging_state_step(bool charging_present, uint8_t charge_done);
+static void product_set_state(product_state_t next, uint32_t counter);
+static void charging_set_state(charging_state_t next, uint32_t counter);
+static void ui_update_u_light(void);
 static uint16_t ui_rpm_to_input(uint32_t rpm);
 static void ui_apply_target(void);
 static void ui_start_motor(void);
@@ -157,6 +207,7 @@ static void ui_btn_inc_short(void);
 static void ui_btn_dec_down(void);
 static void ui_btn_dec_up(void);
 static void ui_btn_dec_short(void);
+static uint8_t ui_read_charge_done(void);
 
 // __attribute__((weak)) void ui_on_power_short_running(void) { }
 __attribute__((weak)) void ui_on_increment_short_callback(void) { }
@@ -179,13 +230,15 @@ void ui_init(void)
     speedPid.last_error = 0;
     armed = 0;
 
-    ui_ctx.device_on = 0;
-    ui_ctx.motor_requested = 0;
-    ui_ctx.target_rpm = 0;
-    ui_ctx.last_nonzero_rpm = 0;
-    ui_ctx.target_input = 0;
-    ui_ctx.shutdown_ticks = 0;
-    ui_ctx.last_tick_count = tenkhzcounter;
+    product.device_on = 0;
+    product.motor_requested = 0;
+    product.target_rpm = 0;
+    product.last_nonzero_rpm = 0;
+    product.target_input = 0;
+    product.shutdown_ticks = 0;
+    product.last_tick_count = tenkhzcounter;
+    product_set_state(PRODUCT_POWER_ON, 0);
+    charging_set_state(CHARGE_NONE, 0);
 
     /* Seed target_rpm/target_input so UI-driven throttle is non-zero. */
     ui_set_target_rpm(MINIMUM_RPM_SPEED_CONTROL);
@@ -196,9 +249,9 @@ void ui_init(void)
 void ui_set_target_rpm(uint32_t rpm)
 {
     if (rpm == 0) {
-        ui_ctx.target_rpm = 0;
-        ui_ctx.target_input = 0;
-        ui_ctx.motor_requested = 0;
+        product.target_rpm = 0;
+        product.target_input = 0;
+        product.motor_requested = 0;
     } else {
         if (rpm < MINIMUM_RPM_SPEED_CONTROL) {
             rpm = MINIMUM_RPM_SPEED_CONTROL;
@@ -206,12 +259,12 @@ void ui_set_target_rpm(uint32_t rpm)
         if (rpm > MAXIMUM_RPM_SPEED_CONTROL) {
             rpm = MAXIMUM_RPM_SPEED_CONTROL;
         }
-        ui_ctx.target_rpm = rpm;
-        ui_ctx.target_input = ui_rpm_to_input(rpm);
-        ui_ctx.last_nonzero_rpm = rpm;
+        product.target_rpm = rpm;
+        product.target_input = ui_rpm_to_input(rpm);
+        product.last_nonzero_rpm = rpm;
     }
 
-    if (ui_ctx.device_on) {
+    if (product.device_on) {
         ui_apply_target();
     }
 }
@@ -219,26 +272,31 @@ void ui_set_target_rpm(uint32_t rpm)
 void ui_request_shutdown(void)
 {
     ui_stop_motor();
-    ui_ctx.device_on = 0;
-    ui_ctx.shutdown_ticks = UI_SHUTDOWN_DELAY_TICKS;
+    product.device_on = 0;
+    product.shutdown_ticks = UI_SHUTDOWN_DELAY_TICKS;
     armed = 0;
 }
 
 uint16_t DebugCount1 = 0;
 static uint16_t ui_diag_tick_accum = 0;
+static uint8_t u_light_level = 0;
+static uint16_t breath_phase = 0;
+static uint8_t breath_dir = 1;
+static uint16_t mode_change_phase = 0;
+static uint16_t fade_phase = 0;
 
 void ui_update(void)
 {
     uint16_t now = tenkhzcounter;
-    uint16_t elapsed = (uint16_t)(now - ui_ctx.last_tick_count);
-
-
-    
+    uint16_t elapsed = (uint16_t)(now - product.last_tick_count);
 
     if (elapsed < UI_TICK_INTERVAL) {
         return;
     }
 
+    product.last_tick_count = now;
+
+#ifdef DEBUG_UART_ENABLE
     if (DebugCount1 > 100)
     {
         DebugCount1 = 0;
@@ -248,60 +306,60 @@ void ui_update(void)
     {
       DebugCount1++;
     }
-        
-    ui_ctx.last_tick_count = now;
+#endif
 
     signaltimeout = 0;
     inputSet = 1;
 
-    if (ui_ctx.shutdown_ticks > 0) {
-        ui_ctx.shutdown_ticks--;
-        if (ui_ctx.shutdown_ticks == 0) {
+    /* Handle suicide/shutdown */
+    if (product.shutdown_ticks > 0) {
+        product.shutdown_ticks--;
+        if (product.shutdown_ticks == 0) {
             GPIO_ResetBits(UI_BAT_V_ON_PORT, UI_BAT_V_ON_PIN);
         }
     }
 
     uint8_t dc_in_raw = ui_read_button(UI_DC_IN_PORT, UI_DC_IN_PIN);
+    uint8_t charging_now = 
 #if UI_DC_IN_ACTIVE_HIGH
-#ifndef DEBUG_UART_ENABLE
-    uint8_t charging_now = dc_in_raw;
+        dc_in_raw;
 #else
-    uint8_t charging_now = 0; /* UART USES CHARGING ACTIVE PIN. */
+        !dc_in_raw;
 #endif
+    uint8_t charge_done = ui_read_charge_done();
+#ifdef DEBUG_UART_ENABLE
+    product.charging_present = false; /* PB6 remap for UART clashes with charge sense; disable while logging. */
 #else
-    uint8_t charging_now = !dc_in_raw;
+    // product.charging_present = charging_now;
+    product.charging_present = false; /* Use this until charging is supported */
 #endif
-    if (charging_now != ui_ctx.charging) {
-        ui_ctx.charging = charging_now;
-        if (ui_ctx.charging) {
-            ui_stop_motor();
-            debug_uart_write("charge_detect\r\n");
-        }
-    }
-
     uint8_t power_pressed = ui_read_button(UI_POWER_BUTTON_PORT, UI_POWER_BUTTON_PIN);
     uint8_t inc_pressed = ui_read_button(UI_INC_BUTTON_PORT, UI_INC_BUTTON_PIN);
     uint8_t dec_pressed = ui_read_button(UI_DEC_BUTTON_PORT, UI_DEC_BUTTON_PIN);
 
-    ui_log_gpio_button(&ui_ctx.power_btn, "power", power_pressed);
-    ui_log_gpio_button(&ui_ctx.inc_btn, "inc", inc_pressed);
-    ui_log_gpio_button(&ui_ctx.dec_btn, "dec", dec_pressed);
+    // ui_log_gpio_button(&product.power_btn, "power", power_pressed);
+    // ui_log_gpio_button(&product.inc_btn, "inc", inc_pressed);
+    // ui_log_gpio_button(&product.dec_btn, "dec", dec_pressed);
 
     BTN_Update(&ui_power_button, power_pressed);
     BTN_Update(&ui_inc_button, inc_pressed);
     BTN_Update(&ui_dec_button, dec_pressed);
 
-    ui_ctx.battery_tick_accum++;
-    if (ui_ctx.battery_tick_accum >= UI_SOC_UPDATE_TICKS) {
-        ui_ctx.battery_tick_accum = 0;
+    product.battery_tick_accum++;
+    if (product.battery_tick_accum >= UI_SOC_UPDATE_TICKS) {
+        product.battery_tick_accum = 0;
         ui_update_soc_and_leds();
     }
 
-    ui_ctx.blink_tick_accum++;
-    if (ui_ctx.blink_tick_accum >= UI_BLINK_PERIOD_TICKS) {
-        ui_ctx.blink_tick_accum = 0;
-        ui_ctx.blink_on = !ui_ctx.blink_on;
+    product.blink_tick_accum++;
+    if (product.blink_tick_accum >= UI_BLINK_PERIOD_TICKS) {
+        product.blink_tick_accum = 0;
+        product.blink_on = !product.blink_on;
     }
+
+    product_state_step(product.charging_present, charge_done);
+    charging_state_step(product.charging_present, charge_done);
+    ui_update_u_light();
 
     ui_diag_tick_accum++;
     if (ui_diag_tick_accum >= UI_TICK_HZ) {
@@ -312,48 +370,330 @@ void ui_update(void)
     ui_apply_target();
 }
 
+static void product_set_state(product_state_t next, uint32_t counter)
+{
+    char msg[80];
+    int n = snprintf(msg, sizeof(msg), "State: %u -> %u\r\n", (unsigned)product.state.Now, (unsigned)next);
+#ifdef DEBUG_UART_ENABLE
+    if (n > 0) {
+        msg[sizeof(msg) - 1] = '\0';
+        debug_uart_write(msg);
+    }
+#endif
+    product.state = (product_state_handle_t){ next, product.state.Now, counter, false };
+}
+
+static void charging_set_state(charging_state_t next, uint32_t counter)
+{
+    char msg[80];
+    int n = snprintf(msg, sizeof(msg), "ChargeState: %u -> %u\r\n", (unsigned)product.charging_state.Now, (unsigned)next);
+#ifdef DEBUG_UART_ENABLE
+    if (n > 0) {
+        msg[sizeof(msg) - 1] = '\0';
+        debug_uart_write(msg);
+    }
+#endif
+    product.charging_state = (charging_state_handle_t){ next, product.charging_state.Now, counter, false };
+}
+
+static void product_state_step(bool charging_present, uint8_t charge_done)
+{
+    (void)charge_done;
+    if (product.state.Counter > 0)
+    {
+        product.state.Counter--;
+    }
+
+
+    // if (product.state.Configured) {
+    //     product.state.Counter++;
+    // } else {
+    //     product.state.Configured = true;
+    //     fade_phase = 0;
+    //     mode_change_phase = 0;
+    // }
+
+    switch (product.state.Now) {
+    case PRODUCT_POWER_ON:
+        if (!product.state.Configured)
+        {
+          product.device_on = 1;
+          fade_phase = 0;
+          product.state.Configured = true;
+        } else
+        {
+          if (fade_phase < UI_TICK_HZ) {
+              fade_phase++;
+              u_light_level = (uint8_t)((fade_phase * 100U) / UI_TICK_HZ);
+          } else
+          {
+              u_light_level = 100;
+              product_set_state(PRODUCT_STANDBY, 0);
+              break;
+          }
+          
+          if (charging_present) {
+              product_set_state(PRODUCT_CHARGING, 0);
+          } else
+          {
+            /* Do nothing */
+          }
+        }
+        break;
+
+    case PRODUCT_STANDBY:
+        if (!product.state.Configured)
+        {
+          product.device_on = 1;
+          breath_phase = 0;
+          breath_dir = 1;
+          product.state.Configured = true;
+        }
+        else
+        {
+          if (charging_present) {
+              product_set_state(PRODUCT_CHARGING, 0);
+              break;
+          } else
+          {
+            if (product.motor_requested || running) {
+                product_set_state(PRODUCT_RUNNING, 0);
+                break;
+            } else
+            {
+              /* Do nothing */
+            }
+          }
+        }
+
+        break;
+
+    case PRODUCT_RUNNING:
+        if (!product.state.Configured) {
+            product.device_on = 1;
+            product.state.Configured = true;
+        } else {
+          if (charging_present) {
+              product.motor_requested = 0;
+              ui_stop_motor();
+              product_set_state(PRODUCT_CHARGING, 0);
+              break;
+          }
+          if (!product.motor_requested && !running) {
+              product_set_state(PRODUCT_STANDBY, 0);
+              break;
+          }
+        }
+        break;
+
+    case PRODUCT_MODE_CHANGE:
+        if (!product.state.Configured) {
+            mode_change_phase = 0;
+            product.state.Configured = true;
+        } else {
+          mode_change_phase++;
+          if (mode_change_phase >= (UI_TICK_HZ * 2U)) {
+              product_set_state(PRODUCT_RUNNING, 0);
+              break;
+          }
+        }
+        break;
+
+    case PRODUCT_POWER_OFF:
+        if (!product.state.Configured) {
+            product.device_on = 0;
+            product.motor_requested = 0;
+            ui_stop_motor();
+            fade_phase = UI_TICK_HZ;
+            product.state.Configured = true;
+        } else
+        {
+          if (fade_phase > 0) {
+              fade_phase--;
+              u_light_level = (uint8_t)((fade_phase * 100U) / UI_TICK_HZ);
+          } else {
+              u_light_level = 0;
+          }
+          if (charging_present) {
+
+              product_set_state(PRODUCT_CHARGING, 0);
+              break;
+          }
+        }
+
+        break;
+
+    case PRODUCT_CHARGING:
+        if (!product.state.Configured) {
+            product.device_on = 0;
+            product.motor_requested = 0;
+            ui_stop_motor();
+            u_light_level = 0;
+            product.state.Configured = true;
+        } else
+        {
+          if (!charging_present) {
+              product_set_state((product.motor_requested || running) ? PRODUCT_RUNNING : PRODUCT_STANDBY, 0);
+          } else
+          {
+            /* Do nothing. */
+          }
+        }
+
+        break;
+
+    case PRODUCT_ERROR:
+    case PRODUCT_IDLE:
+    default:
+        product_set_state(charging_present ? PRODUCT_CHARGING : PRODUCT_STANDBY, 0);
+        break;
+    }
+}
+
+static void charging_state_step(bool charging_present, uint8_t charge_done)
+{
+    if (product.charging_state.Configured) {
+        product.charging_state.Counter++;
+    } else {
+        product.charging_state.Configured = true;
+    }
+
+    if (!charging_present) {
+        if (product.charging_state.Now != CHARGE_NONE){
+          charging_set_state(CHARGE_NONE, 0);
+        }
+        return;
+    } else
+    {
+      if (charge_done)
+      {
+        if (product.charging_state.Now != CHARGE_COMPLETE) {
+            charging_set_state(CHARGE_COMPLETE, 0);
+        }
+      } else
+      {
+          if (product.charging_state.Now != CHARGE_CHARGING) {
+              charging_set_state(CHARGE_CHARGING, 0);
+          }
+      }
+    }
+}
+
+static void ui_update_u_light(void)
+{
+    switch (product.state.Now) {
+    case PRODUCT_STANDBY:
+        if (breath_dir) {
+            if (breath_phase < UI_TICK_HZ) {
+                breath_phase++;
+            } else {
+                breath_dir = 0;
+            }
+        } else {
+            if (breath_phase > 0) {
+                breath_phase--;
+            } else {
+                breath_dir = 1;
+            }
+        }
+        u_light_level = (uint8_t)((breath_phase * 100U) / UI_TICK_HZ);
+        break;
+    case PRODUCT_MODE_CHANGE:
+        if (mode_change_phase < UI_TICK_HZ) {
+            u_light_level = (uint8_t)((mode_change_phase * 100U) / UI_TICK_HZ);
+        } else if (mode_change_phase < (UI_TICK_HZ * 2U)) {
+            uint16_t desc = mode_change_phase - UI_TICK_HZ;
+            if (desc > UI_TICK_HZ) {
+                desc = UI_TICK_HZ;
+            }
+            u_light_level = (uint8_t)(((UI_TICK_HZ - desc) * 100U) / UI_TICK_HZ);
+        } else {
+            u_light_level = 100;
+        }
+        break;
+    case PRODUCT_RUNNING:
+        u_light_level = 100;
+        break;
+    case PRODUCT_POWER_OFF:
+    case PRODUCT_CHARGING:
+        u_light_level = 0;
+        break;
+    case PRODUCT_POWER_ON:
+    case PRODUCT_IDLE:
+    case PRODUCT_ERROR:
+    default:
+        /* PRODUCT_POWER_ON handled by fade logic in state step. */
+        break;
+    }
+}
+
+void ui_light_tick_fast(void)
+{
+    // static uint8_t pwm_counter = 0;
+    // pwm_counter++;
+    // if (pwm_counter >= 100) {
+    //     pwm_counter = 0;
+    // }
+    // uint8_t on = (pwm_counter < u_light_level);
+
+    // uint32_t mask_b = UI_LED1_PIN | UI_LED2_PIN | UI_LED_ORANGE_PIN;
+    // if (on) {
+    //     UI_LED1_PORT->BSRR = mask_b;
+    //     UI_LED3_PORT->BSRR = UI_LED3_PIN;
+    // } else {
+    //     UI_LED1_PORT->BRR = mask_b;
+    //     UI_LED3_PORT->BRR = UI_LED3_PIN;
+    // }
+}
+
 static void ui_on_power_short(void)
 {
   debug_uart_write("ButtonPower Short Press\r\n");
 
-    if (!ui_ctx.device_on) {
+    if (product.state.Now == PRODUCT_CHARGING) {
         return;
     }
 
-    if (!ui_ctx.motor_requested) {
+    product.device_on = 1;
+
+    if (!product.motor_requested) {
         ui_start_motor();
-        // debug_uart_write("Motor start trigger\r\n");
+        product_set_state(PRODUCT_RUNNING, 0);
     } else {
-        ui_ctx.motor_requested = 0;
+        product.motor_requested = 0;
+        product_set_state(PRODUCT_STANDBY, 0);
         ui_on_power_short_running();
-        // debug_uart_write("Motor stop trigger\r\n");
     }
 }
 
 static void ui_on_power_long(void)
 {
     debug_uart_write("ButtonPower Long Press\r\n");
-    if (!ui_ctx.device_on) {
-        ui_ctx.device_on = 1;
-        ui_ctx.shutdown_ticks = 0;
-        debug_uart_write("device_on\r\n");
+    if (product.state.Now == PRODUCT_CHARGING) {
         return;
     }
-    debug_uart_write("power_off\r\n");
-    ui_request_shutdown();
+    if (!product.device_on) {
+        product.device_on = 1;
+        product.shutdown_ticks = 0;
+        debug_uart_write("device_on\r\n");
+    } else {
+        debug_uart_write("power_off\r\n");
+        product_set_state(PRODUCT_POWER_OFF, 0);
+        ui_request_shutdown();
+    }
 }
 
 static void ui_on_inc_short(void)
 {
   debug_uart_write("ButtonInc Short Press\r\n");
 
-    if (!ui_ctx.device_on) {
+    if (!product.device_on || product.state.Now == PRODUCT_CHARGING) {
         return;
     }
-    if (ui_ctx.motor_requested || running) {
-        ui_set_target_rpm(ui_ctx.target_rpm + UI_RPM_STEP);
+    if (product.motor_requested || running) {
+        ui_set_target_rpm(product.target_rpm + UI_RPM_STEP);
         ui_on_increment_short_callback();
-        debug_uart_write("inc\r\n");
+        product_set_state(PRODUCT_MODE_CHANGE, 0);
     }
 }
 
@@ -361,17 +701,17 @@ static void ui_on_dec_short(void)
 {
     debug_uart_write("ButtonDec Short Press\r\n");
 
-    if (!ui_ctx.device_on) {
+    if (!product.device_on || product.state.Now == PRODUCT_CHARGING) {
         return;
     }
-    if (ui_ctx.motor_requested || running) {
-        if (ui_ctx.target_rpm > UI_RPM_STEP) {
-            ui_set_target_rpm(ui_ctx.target_rpm - UI_RPM_STEP);
+    if (product.motor_requested || running) {
+        if (product.target_rpm > UI_RPM_STEP) {
+            ui_set_target_rpm(product.target_rpm - UI_RPM_STEP);
         } else {
             ui_set_target_rpm(0);
         }
         ui_on_decrement_short_callback();
-        debug_uart_write("dec\r\n");
+        product_set_state(PRODUCT_MODE_CHANGE, 0);
     }
 }
 
@@ -400,6 +740,10 @@ static void ui_configure_gpio(void)
     gpio.GPIO_Pin = UI_DEC_BUTTON_PIN;
     GPIO_Init(UI_DEC_BUTTON_PORT, &gpio);
 
+    gpio.GPIO_Pin = UI_CHG_DONE_PIN;
+    gpio.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_Init(UI_CHG_DONE_PORT, &gpio);
+
     gpio.GPIO_Pin = UI_DC_IN_PIN;
     gpio.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(UI_DC_IN_PORT, &gpio);
@@ -408,6 +752,16 @@ static void ui_configure_gpio(void)
 static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin)
 {
     return GPIO_ReadInputDataBit(port, pin) == Bit_RESET;
+}
+
+static uint8_t ui_read_charge_done(void)
+{
+    uint8_t raw = ui_read_button(UI_CHG_DONE_PORT, UI_CHG_DONE_PIN);
+#if UI_CHG_DONE_ACTIVE_LOW
+    return raw;
+#else
+    return !raw;
+#endif
 }
 
 static void ui_log_button_event(const char* origin, const char* name, const char* event)
@@ -439,19 +793,14 @@ static void ui_log_context(void)
 {
     char buf[180];
     int n = snprintf(buf, sizeof(buf),
-                     "UI ctx: dev=%u motor_req=%u charging=%u soc=%u blink=%u tgt_in=%u tgt_rpm=%lu last_rpm=%lu last_tick=%u bat_tick=%u blink_tick=%u shutdown=%u\r\n",
-                     (unsigned)ui_ctx.device_on,
-                     (unsigned)ui_ctx.motor_requested,
-                     (unsigned)ui_ctx.charging,
-                     (unsigned)ui_ctx.soc,
-                     (unsigned)ui_ctx.blink_on,
-                     (unsigned)ui_ctx.target_input,
-                     (unsigned long)ui_ctx.target_rpm,
-                     (unsigned long)ui_ctx.last_nonzero_rpm,
-                     (unsigned)ui_ctx.last_tick_count,
-                     (unsigned)ui_ctx.battery_tick_accum,
-                     (unsigned)ui_ctx.blink_tick_accum,
-                     (unsigned)ui_ctx.shutdown_ticks);
+                     "UI product: dev=%u motor_req=%u charging=%u chg_state=%u soc=%u tgt_in=%u state=%u \r\n",
+                     (unsigned)product.device_on,
+                     (unsigned)product.motor_requested,
+                     (unsigned)product.charging_present,
+                     (unsigned)product.charging_state.Now,
+                     (unsigned)product.soc,
+                     (unsigned)product.target_input,
+                     (unsigned)product.state.Now);
     if (n > 0) {
         buf[sizeof(buf) - 1] = '\0';
         debug_uart_write(buf);
@@ -545,13 +894,13 @@ static void ui_apply_target(void)
 {
     signaltimeout = 0;
 
-    if (!ui_ctx.device_on || !ui_ctx.motor_requested || ui_ctx.target_input == 0 || ui_ctx.charging) {
+    if (!product.device_on || !product.motor_requested || product.target_input == 0 || product.charging_present) {
         newinput = 0;
         input_override = 0;
         speedPid.integral = 0;
         speedPid.error = 0;
     } else {
-        newinput = ui_ctx.target_input;
+        newinput = product.target_input;
     }
 
     setInput();
@@ -559,13 +908,13 @@ static void ui_apply_target(void)
 
 static void ui_start_motor(void)
 {
-    if (ui_ctx.charging) {
+    if (product.charging_present) {
         return;
     }
-    ui_ctx.device_on = 1;
-    ui_ctx.shutdown_ticks = 0;
-    if ((ui_ctx.target_rpm == 0) || (ui_ctx.target_input == 0)) {
-        uint32_t rpm = ui_ctx.target_rpm ? ui_ctx.target_rpm : (ui_ctx.last_nonzero_rpm ? ui_ctx.last_nonzero_rpm : MINIMUM_RPM_SPEED_CONTROL);
+    product.device_on = 1;
+    product.shutdown_ticks = 0;
+    if ((product.target_rpm == 0) || (product.target_input == 0)) {
+        uint32_t rpm = product.target_rpm ? product.target_rpm : (product.last_nonzero_rpm ? product.last_nonzero_rpm : MINIMUM_RPM_SPEED_CONTROL);
         ui_set_target_rpm(rpm);
     }
 
@@ -580,7 +929,7 @@ static void ui_start_motor(void)
     speedPid.error = 0;
     speedPid.last_error = 0;
     armed = 1;
-    ui_ctx.motor_requested = 1;
+    product.motor_requested = 1;
     debug_uart_write("motor_start\r\n");
     ui_apply_target();
 }
@@ -590,10 +939,9 @@ static void ui_on_power_short_running(void)
     ui_stop_motor();
 }
 
-
 static void ui_stop_motor(void)
 {
-    ui_ctx.motor_requested = 0;
+    product.motor_requested = 0;
     debug_uart_write("motor_stop\r\n");
     ui_apply_target();
 }
@@ -620,25 +968,12 @@ static void ui_set_led(GPIO_TypeDef* port, uint16_t pin, uint8_t on)
 
 static void ui_drive_leds(uint8_t soc, uint8_t charging, uint8_t blink_on)
 {
-    uint8_t level = (soc + 24U) / 25U; // 0-4 bars
-
-    ui_set_led(UI_LED1_PORT, UI_LED1_PIN, level >= 1);
-    ui_set_led(UI_LED2_PORT, UI_LED2_PIN, level >= 2);
-    ui_set_led(UI_LED3_PORT, UI_LED3_PIN, level >= 3);
-
-    uint8_t orange_on = 0;
-    if (charging) {
-        orange_on = 1;
-    } else if (soc <= 20U) {
-        orange_on = blink_on;
-    } else if (level >= 4U) {
-        orange_on = 1;
-    }
-    ui_set_led(UI_LED_ORANGE_PORT, UI_LED_ORANGE_PIN, orange_on);
+    (void)soc;
+    (void)charging;
+    (void)blink_on;
 }
 
 static void ui_update_soc_and_leds(void)
 {
-    ui_ctx.soc = ui_calculate_soc(battery_voltage);
-    ui_drive_leds(ui_ctx.soc, ui_ctx.charging, ui_ctx.blink_on);
+    product.soc = ui_calculate_soc(battery_voltage);
 }
