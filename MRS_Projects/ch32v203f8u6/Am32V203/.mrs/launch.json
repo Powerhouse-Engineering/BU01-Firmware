@@ -5,7 +5,7 @@
 			"type": "mrs-debugger",
 			"request": "launch",
 			"name": "Am32V203",
-			"cwd": "c:\\Users\\santi\\PowerHouse\\Orbt\\AM32-Orbt-Fork\\MRS_Projects\\ch32v203f8u6\\Am32V203",
+			"cwd": "c:\\Users\\santi\\PowerHouse\\BU01\\BU01-Firmware\\MRS_Projects\\ch32v203f8u6\\Am32V203",
 			"openOCDCfg": {
 				"useLocalOpenOCD": true,
 				"executable": "c:/MounRiver/MounRiver_Studio2/resources/app/resources/win32/components/WCH/OpenOCD/OpenOCD/bin/openocd.exe",
@@ -39,8 +39,8 @@
 					"additionalCommands": []
 				},
 				"loadedFiles": {
-					"executableFile": "c:\\Users\\santi\\PowerHouse\\Orbt\\AM32-Orbt-Fork\\MRS_Projects\\ch32v203f8u6\\Am32V203\\obj\\Am32V203.elf",
-					"symbolFile": "c:\\Users\\santi\\PowerHouse\\Orbt\\AM32-Orbt-Fork\\MRS_Projects\\ch32v203f8u6\\Am32V203\\obj\\Am32V203.elf",
+					"executableFile": "c:\\Users\\santi\\PowerHouse\\BU01\\BU01-Firmware\\MRS_Projects\\ch32v203f8u6\\Am32V203\\obj\\Am32V203.elf",
+					"symbolFile": "c:\\Users\\santi\\PowerHouse\\BU01\\BU01-Firmware\\MRS_Projects\\ch32v203f8u6\\Am32V203\\obj\\Am32V203.elf",
 					"executableFileOffset": 0,
 					"symbolFileOffset": 0
 				},

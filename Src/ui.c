@@ -1,6 +1,8 @@
 #include "ui.h"
 
+#include "button.h"
 #include "common.h"
+#include "debug_uart.h"
 #include "dshot.h"
 #include "functions.h"
 #include "main.h"
@@ -33,6 +35,7 @@
 #define UI_TICK_INTERVAL (LOOP_FREQUENCY_HZ / UI_TICK_HZ)
 #define UI_DEBOUNCE_TICKS 3U
 #define UI_LONG_PRESS_TICKS 100U // 1 second at 100Hz
+#define UI_SHORT_PRESS_MAX_TICKS (UI_LONG_PRESS_TICKS - 1U)
 #define UI_SHUTDOWN_DELAY_TICKS UI_TICK_HZ // 1 second
 #define UI_SOC_UPDATE_TICKS (UI_TICK_HZ / 5U)
 #define UI_BLINK_PERIOD_TICKS (UI_TICK_HZ / 2U)
@@ -59,9 +62,8 @@ extern void setInput(void);
 
 typedef struct {
     uint8_t stable_pressed;
-    uint16_t press_ticks;
     uint8_t debounce_ticks;
-} ui_button_t;
+} ui_gpio_button_t;
 
 typedef struct {
     uint8_t device_on;
@@ -76,9 +78,9 @@ typedef struct {
     uint16_t battery_tick_accum;
     uint16_t blink_tick_accum;
     uint16_t shutdown_ticks;
-    ui_button_t power_btn;
-    ui_button_t inc_btn;
-    ui_button_t dec_btn;
+    ui_gpio_button_t power_btn;
+    ui_gpio_button_t inc_btn;
+    ui_gpio_button_t dec_btn;
 } ui_context_t;
 
 static ui_context_t ui_ctx = {
@@ -94,14 +96,43 @@ static ui_context_t ui_ctx = {
     .battery_tick_accum = 0,
     .blink_tick_accum = 0,
     .shutdown_ticks = 0,
-    .power_btn = { 0, 0, 0 },
-    .inc_btn = { 0, 0, 0 },
-    .dec_btn = { 0, 0, 0 }
+    .power_btn = { 0, 0 },
+    .inc_btn = { 0, 0 },
+    .dec_btn = { 0, 0 }
+};
+
+static Button_Handle_t ui_power_button = {
+    .FilterTicks = UI_DEBOUNCE_TICKS,
+    .LongPressTicks = UI_LONG_PRESS_TICKS,
+    .LongPressHoldTicks = 0,
+    .DoublePressEnabled = false,
+    .DoublePressWaitTicks = 0,
+    .ShortPressMaxTicks = UI_SHORT_PRESS_MAX_TICKS,
+};
+
+static Button_Handle_t ui_inc_button = {
+    .FilterTicks = UI_DEBOUNCE_TICKS,
+    .LongPressTicks = UI_LONG_PRESS_TICKS,
+    .LongPressHoldTicks = 0,
+    .DoublePressEnabled = false,
+    .DoublePressWaitTicks = 0,
+    .ShortPressMaxTicks = UI_SHORT_PRESS_MAX_TICKS,
+};
+
+static Button_Handle_t ui_dec_button = {
+    .FilterTicks = UI_DEBOUNCE_TICKS,
+    .LongPressTicks = UI_LONG_PRESS_TICKS,
+    .LongPressHoldTicks = 0,
+    .DoublePressEnabled = false,
+    .DoublePressWaitTicks = 0,
+    .ShortPressMaxTicks = UI_SHORT_PRESS_MAX_TICKS,
 };
 
 static void ui_configure_gpio(void);
 static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin);
-static void ui_handle_button(ui_button_t* btn, uint8_t pressed, void (*on_short)(void), void (*on_long)(void));
+static void ui_log_button_event(const char* origin, const char* name, const char* event);
+static void ui_log_gpio_button(ui_gpio_button_t* btn, const char* name, uint8_t pressed);
+static void ui_init_button_module(void);
 static uint16_t ui_rpm_to_input(uint32_t rpm);
 static void ui_apply_target(void);
 static void ui_start_motor(void);
@@ -113,6 +144,16 @@ static void ui_on_power_short(void);
 static void ui_on_power_long(void);
 static void ui_on_inc_short(void);
 static void ui_on_dec_short(void);
+static void ui_btn_power_down(void);
+static void ui_btn_power_up(void);
+static void ui_btn_power_short(void);
+static void ui_btn_power_long(void);
+static void ui_btn_inc_down(void);
+static void ui_btn_inc_up(void);
+static void ui_btn_inc_short(void);
+static void ui_btn_dec_down(void);
+static void ui_btn_dec_up(void);
+static void ui_btn_dec_short(void);
 
 __attribute__((weak)) void ui_on_power_short_running(void) { }
 __attribute__((weak)) void ui_on_increment_short_callback(void) { }
@@ -142,6 +183,8 @@ void ui_init(void)
     ui_ctx.target_input = 0;
     ui_ctx.shutdown_ticks = 0;
     ui_ctx.last_tick_count = tenkhzcounter;
+
+    ui_init_button_module();
 }
 
 void ui_set_target_rpm(uint32_t rpm)
@@ -175,14 +218,30 @@ void ui_request_shutdown(void)
     armed = 0;
 }
 
+uint16_t DebugCount1 = 0;
+
 void ui_update(void)
 {
     uint16_t now = tenkhzcounter;
     uint16_t elapsed = (uint16_t)(now - ui_ctx.last_tick_count);
 
+
+    
+
     if (elapsed < UI_TICK_INTERVAL) {
         return;
     }
+
+    if (DebugCount1 > 100)
+    {
+        DebugCount1 = 0;
+        debug_uart_write("UI alive\r\n");
+    }
+    else
+    {
+      DebugCount1++;
+    }
+        
     ui_ctx.last_tick_count = now;
 
     signaltimeout = 0;
@@ -205,18 +264,21 @@ void ui_update(void)
         ui_ctx.charging = charging_now;
         if (ui_ctx.charging) {
             ui_stop_motor();
+            debug_uart_write("charge_detect\r\n");
         }
     }
 
-    ui_handle_button(&ui_ctx.power_btn, ui_read_button(UI_POWER_BUTTON_PORT, UI_POWER_BUTTON_PIN), ui_on_power_short, ui_on_power_long);
+    uint8_t power_pressed = ui_read_button(UI_POWER_BUTTON_PORT, UI_POWER_BUTTON_PIN);
+    uint8_t inc_pressed = ui_read_button(UI_INC_BUTTON_PORT, UI_INC_BUTTON_PIN);
+    uint8_t dec_pressed = ui_read_button(UI_DEC_BUTTON_PORT, UI_DEC_BUTTON_PIN);
 
-    if (ui_ctx.device_on && (running || ui_ctx.motor_requested)) {
-        ui_handle_button(&ui_ctx.inc_btn, ui_read_button(UI_INC_BUTTON_PORT, UI_INC_BUTTON_PIN), ui_on_inc_short, 0);
-        ui_handle_button(&ui_ctx.dec_btn, ui_read_button(UI_DEC_BUTTON_PORT, UI_DEC_BUTTON_PIN), ui_on_dec_short, 0);
-    } else {
-        ui_ctx.inc_btn.press_ticks = 0;
-        ui_ctx.dec_btn.press_ticks = 0;
-    }
+    ui_log_gpio_button(&ui_ctx.power_btn, "power", power_pressed);
+    ui_log_gpio_button(&ui_ctx.inc_btn, "inc", inc_pressed);
+    ui_log_gpio_button(&ui_ctx.dec_btn, "dec", dec_pressed);
+
+    BTN_Update(&ui_power_button, power_pressed);
+    BTN_Update(&ui_inc_button, inc_pressed);
+    BTN_Update(&ui_dec_button, dec_pressed);
 
     ui_ctx.battery_tick_accum++;
     if (ui_ctx.battery_tick_accum >= UI_SOC_UPDATE_TICKS) {
@@ -235,6 +297,8 @@ void ui_update(void)
 
 static void ui_on_power_short(void)
 {
+  debug_uart_write("ButtonPower Short Press\r\n");
+
     if (!ui_ctx.device_on) {
         return;
     }
@@ -248,27 +312,35 @@ static void ui_on_power_short(void)
 
 static void ui_on_power_long(void)
 {
+    debug_uart_write("ButtonPower Long Press\r\n");
     if (!ui_ctx.device_on) {
         ui_ctx.device_on = 1;
         ui_ctx.shutdown_ticks = 0;
+        debug_uart_write("device_on\r\n");
         return;
     }
+    debug_uart_write("power_off\r\n");
     ui_request_shutdown();
 }
 
 static void ui_on_inc_short(void)
 {
+  debug_uart_write("ButtonInc Short Press\r\n");
+
     if (!ui_ctx.device_on) {
         return;
     }
     if (ui_ctx.motor_requested || running) {
         ui_set_target_rpm(ui_ctx.target_rpm + UI_RPM_STEP);
         ui_on_increment_short_callback();
+        debug_uart_write("inc\r\n");
     }
 }
 
 static void ui_on_dec_short(void)
 {
+    debug_uart_write("ButtonDec Short Press\r\n");
+
     if (!ui_ctx.device_on) {
         return;
     }
@@ -279,6 +351,7 @@ static void ui_on_dec_short(void)
             ui_set_target_rpm(0);
         }
         ui_on_decrement_short_callback();
+        debug_uart_write("dec\r\n");
     }
 }
 
@@ -317,39 +390,107 @@ static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin)
     return GPIO_ReadInputDataBit(port, pin) == Bit_RESET;
 }
 
-static void ui_handle_button(ui_button_t* btn, uint8_t pressed, void (*on_short)(void), void (*on_long)(void))
+static void ui_log_button_event(const char* origin, const char* name, const char* event)
 {
-    if (pressed == btn->stable_pressed) {
+    debug_uart_write(origin);
+    debug_uart_write(" ");
+    debug_uart_write(name);
+    debug_uart_write(": ");
+    debug_uart_write(event);
+    debug_uart_write("\r\n");
+}
+
+static void ui_log_gpio_button(ui_gpio_button_t* btn, const char* name, uint8_t pressed)
+{
+    if (pressed != btn->stable_pressed) {
         if (btn->debounce_ticks < UI_DEBOUNCE_TICKS) {
             btn->debounce_ticks++;
+        }
+        if (btn->debounce_ticks >= UI_DEBOUNCE_TICKS) {
+            btn->stable_pressed = pressed;
+            ui_log_button_event("GPIO", name, pressed ? "DOWN" : "UP");
         }
     } else {
         btn->debounce_ticks = 0;
     }
+}
 
-    if (btn->debounce_ticks >= UI_DEBOUNCE_TICKS) {
-        btn->stable_pressed = pressed;
-    }
+static void ui_btn_power_down(void)
+{
+    ui_log_button_event("BTN", "power", "DOWN");
+}
 
-    if (btn->stable_pressed) {
-        if (btn->press_ticks < 0xFFFF) {
-            btn->press_ticks++;
-        }
-        return;
-    }
+static void ui_btn_power_up(void)
+{
+    ui_log_button_event("BTN", "power", "UP");
+}
 
-    if (btn->press_ticks > 0) {
-        if (btn->press_ticks >= UI_LONG_PRESS_TICKS) {
-            if (on_long) {
-                on_long();
-            }
-        } else {
-            if (on_short) {
-                on_short();
-            }
-        }
-    }
-    btn->press_ticks = 0;
+static void ui_btn_power_short(void)
+{
+    ui_log_button_event("BTN", "power", "SHORT");
+    ui_on_power_short();
+}
+
+static void ui_btn_power_long(void)
+{
+    ui_log_button_event("BTN", "power", "LONG");
+    ui_on_power_long();
+}
+
+static void ui_btn_inc_down(void)
+{
+    ui_log_button_event("BTN", "inc", "DOWN");
+}
+
+static void ui_btn_inc_up(void)
+{
+    ui_log_button_event("BTN", "inc", "UP");
+}
+
+static void ui_btn_inc_short(void)
+{
+    ui_log_button_event("BTN", "inc", "SHORT");
+    ui_on_inc_short();
+}
+
+static void ui_btn_dec_down(void)
+{
+    ui_log_button_event("BTN", "dec", "DOWN");
+}
+
+static void ui_btn_dec_up(void)
+{
+    ui_log_button_event("BTN", "dec", "UP");
+}
+
+static void ui_btn_dec_short(void)
+{
+    ui_log_button_event("BTN", "dec", "SHORT");
+    ui_on_dec_short();
+}
+
+static void ui_init_button_module(void)
+{
+    BTN_Init(&ui_power_button);
+    BTN_Init(&ui_inc_button);
+    BTN_Init(&ui_dec_button);
+
+    BTN_Reset(&ui_power_button);
+    BTN_Reset(&ui_inc_button);
+    BTN_Reset(&ui_dec_button);
+
+    BTN_RegisterCallback_Down(&ui_power_button, ui_btn_power_down);
+    BTN_RegisterCallback_Up(&ui_power_button, ui_btn_power_up);
+    BTN_RegisterCallback_ShortPress(&ui_power_button, ui_btn_power_short);
+    BTN_RegisterCallback_LongPress(&ui_power_button, ui_btn_power_long);
+
+    BTN_RegisterCallback_Down(&ui_inc_button, ui_btn_inc_down);
+    BTN_RegisterCallback_Up(&ui_inc_button, ui_btn_inc_up);
+    BTN_RegisterCallback_ShortPress(&ui_inc_button, ui_btn_inc_short);
+
+    BTN_RegisterCallback_Down(&ui_dec_button, ui_btn_dec_down);
+    BTN_RegisterCallback_Up(&ui_dec_button, ui_btn_dec_up);
+    BTN_RegisterCallback_ShortPress(&ui_dec_button, ui_btn_dec_short);
 }
 
 static uint16_t ui_rpm_to_input(uint32_t rpm)
@@ -396,13 +537,14 @@ static void ui_start_motor(void)
     speedPid.last_error = 0;
     armed = 1;
     ui_ctx.motor_requested = 1;
-
+    debug_uart_write("motor_start\r\n");
     ui_apply_target();
 }
 
 static void ui_stop_motor(void)
 {
     ui_ctx.motor_requested = 0;
+    debug_uart_write("motor_stop\r\n");
     ui_apply_target();
 }
 

@@ -223,6 +223,7 @@ an settings option)
 #include "dshot.h"
 #include "eeprom.h"
 #include "functions.h"
+#include "debug_uart.h"
 #include "peripherals.h"
 #include "phaseouts.h"
 #include "serial_telemetry.h"
@@ -1644,6 +1645,10 @@ int main(void)
 
 #ifdef USE_BUTTON_UI
     ui_init();
+#endif
+#ifdef DEBUG_UART_ENABLE
+    debug_uart_init(19200);
+    debug_uart_write("boot\r\n");
 #endif
 
     enableCorePeripherals();

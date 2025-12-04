@@ -634,7 +634,7 @@
 	"flashConfig": {
 		"mcutype": "CH32V20x",
 		"address": "0x08000000",
-		"target_path": "C:\\Users\\santi\\PowerHouse\\Orbt\\AM32-Orbt-Fork\\MRS_Projects\\ch32v203f8u6\\Am32V203\\obj\\Am32V203.hex",
+		"target_path": "C:\\Users\\santi\\PowerHouse\\Orbt\\PreCompiled_Boot_and_Software_V203\\AM32_V203_BOOTLOADER_PA0_V14.hex",
 		"clkSpeed": "High",
 		"debug_interface_mode": "",
 		"erase": true,
