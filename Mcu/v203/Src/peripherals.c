@@ -57,25 +57,35 @@ void AT_COMP_Init(void)
      GPIO_InitTypeDef        GPIO_InitStruct = {0};
      EXTI_InitTypeDef        EXTI_InitStructure = {0};
 
+
+
      GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_5;
      GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AIN;
      GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+#if defined(DEBUG_UART_ENABLE) && !defined(DEBUG_UART_USE_USART1)
+     GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_11|GPIO_Pin_14|GPIO_Pin_15;
+     GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AIN;
+     GPIO_Init(GPIOB, &GPIO_InitStruct);
+#else
      GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_10|GPIO_Pin_11|GPIO_Pin_14|GPIO_Pin_15;
      GPIO_InitStruct.GPIO_Mode = GPIO_Mode_AIN;
      GPIO_Init(GPIOB, &GPIO_InitStruct);
+#endif
+
 
      GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_4|GPIO_Pin_3;
      GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IN_FLOATING;
      GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-     GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_2;              //ÖÐ¶Ï»ãÈë¿Ú
+     GPIO_InitStruct.GPIO_Pin  = GPIO_Pin_2;              //ï¿½Ð¶Ï»ï¿½ï¿½ï¿½ï¿½
      GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IN_FLOATING;
      GPIO_Init(GPIOA, &GPIO_InitStruct);
 
      //1P0(PB15)  2P0(PB14) --> COM_BEMF   2N1(PA5)-->A_BEMF  2N0(PB10)-->B_BEMF 1N0(PB11)-->C_BEMF
      //2O1(PA4)  1O0(PA3)
 
+#if !(defined(DEBUG_UART_ENABLE) && !defined(DEBUG_UART_USE_USART1))
      OPA->CR = 0x01;
 
 #ifdef USE_PA2_AS_COMP
@@ -88,7 +98,7 @@ void AT_COMP_Init(void)
      EXTI_Init(&EXTI_InitStructure);
      EXTI_ClearITPendingBit(EXTI_Line2);
 
-     SetVTFIRQ( (uint32_t)EXTI2_IRQHandler,EXTI2_IRQn,1,ENABLE  );  //¹ýÁã±È½ÏÖÐ¶ÏÉèÖÃÎªÃâ±íÖÐ¶Ï
+     SetVTFIRQ( (uint32_t)EXTI2_IRQHandler,EXTI2_IRQn,1,ENABLE  );  //ï¿½ï¿½ï¿½ï¿½È½ï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
 
      NVIC_SetPriority(EXTI2_IRQn, 0);
      NVIC_EnableIRQ(EXTI2_IRQn);
@@ -102,7 +112,7 @@ void AT_COMP_Init(void)
      EXTI_Init(&EXTI_InitStructure);
      EXTI_ClearITPendingBit(EXTI_Line3);
 
-     SetVTFIRQ( (uint32_t)EXTI3_IRQHandler,EXTI3_IRQn,1,ENABLE  );  //¹ýÁã±È½ÏÖÐ¶ÏÉèÖÃÎªÃâ±íÖÐ¶Ï
+     SetVTFIRQ( (uint32_t)EXTI3_IRQHandler,EXTI3_IRQn,1,ENABLE  );  //ï¿½ï¿½ï¿½ï¿½È½ï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
 
      NVIC_SetPriority(EXTI3_IRQn, 0x20);
      NVIC_EnableIRQ(EXTI3_IRQn);
@@ -116,10 +126,11 @@ void AT_COMP_Init(void)
      EXTI_Init(&EXTI_InitStructure);
      EXTI_ClearITPendingBit(EXTI_Line4);
 
-     SetVTFIRQ( (uint32_t)EXTI4_IRQHandler,EXTI4_IRQn,2,ENABLE  );  //¹ýÁã±È½ÏÖÐ¶ÏÉèÖÃÎªÃâ±íÖÐ¶Ï
+     SetVTFIRQ( (uint32_t)EXTI4_IRQHandler,EXTI4_IRQn,2,ENABLE  );  //ï¿½ï¿½ï¿½ï¿½È½ï¿½ï¿½Ð¶ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
 
      NVIC_SetPriority(EXTI4_IRQn, 0x20);
      NVIC_EnableIRQ(EXTI4_IRQn);
+#endif
 #endif
 }
 
@@ -319,7 +330,7 @@ void UN_TIM2_Init(void) //IC Timer Init
     TIM_ICInitStructure.TIM_Channel = TIM_Channel_1;
     TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
     TIM_ICInitStructure.TIM_ICFilter = 0x00;
-    TIM_ICInitStructure.TIM_ICPolarity = TIM_ICPolarity_Rising;       //´ÓÉÏÉýÑØ¿ªÊ¼
+    TIM_ICInitStructure.TIM_ICPolarity = TIM_ICPolarity_Rising;       //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø¿ï¿½Ê¼
     TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
     TIM_ICInit(TIM2, &TIM_ICInitStructure);
 
@@ -481,3 +492,5 @@ void enableCorePeripherals()
 //    NVIC_SetPriority(Software_IRQn, 0xC0);
 //    NVIC_EnableIRQ(Software_IRQn);
 }
+
+

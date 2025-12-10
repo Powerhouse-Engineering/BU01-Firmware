@@ -284,6 +284,7 @@ static uint16_t breath_phase = 0;
 static uint8_t breath_dir = 1;
 static uint16_t mode_change_phase = 0;
 static uint16_t fade_phase = 0;
+static void ui_debug_write(const char* msg);
 
 void ui_update(void)
 {
@@ -296,17 +297,17 @@ void ui_update(void)
 
     product.last_tick_count = now;
 
-#ifdef DEBUG_UART_ENABLE
+// #ifdef DEBUG_UART_ENABLE
     if (DebugCount1 > 100)
     {
         DebugCount1 = 0;
-        debug_uart_write("UI alive\r\n");
+        ui_debug_write("UI alive\r\n");
     }
     else
     {
       DebugCount1++;
     }
-#endif
+// #endif
 
     signaltimeout = 0;
     inputSet = 1;
@@ -330,8 +331,7 @@ void ui_update(void)
 #ifdef DEBUG_UART_ENABLE
     product.charging_present = false; /* PB6 remap for UART clashes with charge sense; disable while logging. */
 #else
-    // product.charging_present = charging_now;
-    product.charging_present = false; /* Use this until charging is supported */
+    product.charging_present = charging_now;
 #endif
     uint8_t power_pressed = ui_read_button(UI_POWER_BUTTON_PORT, UI_POWER_BUTTON_PIN);
     uint8_t inc_pressed = ui_read_button(UI_INC_BUTTON_PORT, UI_INC_BUTTON_PIN);
@@ -374,12 +374,10 @@ static void product_set_state(product_state_t next, uint32_t counter)
 {
     char msg[80];
     int n = snprintf(msg, sizeof(msg), "State: %u -> %u\r\n", (unsigned)product.state.Now, (unsigned)next);
-#ifdef DEBUG_UART_ENABLE
     if (n > 0) {
         msg[sizeof(msg) - 1] = '\0';
-        debug_uart_write(msg);
+        ui_debug_write(msg);
     }
-#endif
     product.state = (product_state_handle_t){ next, product.state.Now, counter, false };
 }
 
@@ -387,12 +385,10 @@ static void charging_set_state(charging_state_t next, uint32_t counter)
 {
     char msg[80];
     int n = snprintf(msg, sizeof(msg), "ChargeState: %u -> %u\r\n", (unsigned)product.charging_state.Now, (unsigned)next);
-#ifdef DEBUG_UART_ENABLE
     if (n > 0) {
         msg[sizeof(msg) - 1] = '\0';
-        debug_uart_write(msg);
+        ui_debug_write(msg);
     }
-#endif
     product.charging_state = (charging_state_handle_t){ next, product.charging_state.Now, counter, false };
 }
 
@@ -629,21 +625,33 @@ static void ui_update_u_light(void)
 
 void ui_light_tick_fast(void)
 {
-    // static uint8_t pwm_counter = 0;
-    // pwm_counter++;
-    // if (pwm_counter >= 100) {
-    //     pwm_counter = 0;
-    // }
-    // uint8_t on = (pwm_counter < u_light_level);
+    static uint8_t pwm_counter = 0;
+    pwm_counter++;
+    if (pwm_counter >= 100) {
+        pwm_counter = 0;
+    }
+    uint8_t on = (pwm_counter < u_light_level);
 
-    // uint32_t mask_b = UI_LED1_PIN | UI_LED2_PIN | UI_LED_ORANGE_PIN;
-    // if (on) {
-    //     UI_LED1_PORT->BSRR = mask_b;
-    //     UI_LED3_PORT->BSRR = UI_LED3_PIN;
-    // } else {
-    //     UI_LED1_PORT->BRR = mask_b;
-    //     UI_LED3_PORT->BRR = UI_LED3_PIN;
-    // }
+    uint32_t mask_b = UI_LED1_PIN | UI_LED2_PIN | UI_LED_ORANGE_PIN;
+    if (on) {
+        GPIO_SetBits(UI_LED1_PORT, mask_b);
+        GPIO_SetBits(UI_LED3_PORT, UI_LED3_PIN);
+    } else {
+        GPIO_ResetBits(UI_LED1_PORT, mask_b);
+        GPIO_ResetBits(UI_LED3_PORT, UI_LED3_PIN);
+    }
+}
+
+static void ui_debug_write(const char* msg)
+{
+    if (!msg) {
+        return;
+    }
+#ifdef DEBUG_UART_ENABLE
+    debug_uart_write(msg);
+#else
+    (void)msg;
+#endif
 }
 
 static void ui_on_power_short(void)
@@ -747,6 +755,7 @@ static void ui_configure_gpio(void)
     gpio.GPIO_Pin = UI_DC_IN_PIN;
     gpio.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(UI_DC_IN_PORT, &gpio);
+
 }
 
 static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin)
