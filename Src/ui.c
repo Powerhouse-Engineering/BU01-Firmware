@@ -5,9 +5,12 @@
 #include "debug_uart.h"
 #include "dshot.h"
 #include "functions.h"
+#include "led_anim.h"
+#include "config.h"
 #include "main.h"
 #include "targets.h"
 #include <stdio.h>
+#include <stddef.h>
 
 #define UI_BAT_V_ON_PORT GPIOB
 #define UI_BAT_V_ON_PIN GPIO_Pin_12
@@ -46,6 +49,12 @@
 #define UI_SOC_MIN_CV 330U  // 3.30V per cell shown as 330 (centivolts)
 #define UI_SOC_MAX_CV 420U  // 4.20V per cell shown as 420 (centivolts)
 #define UI_RPM_STEP 600U
+
+#define BATTERY_LEVEL_UNKNOWN 0xFF
+#define BATTERY_LEVEL_LOW 20
+#define BATTERY_LEVEL_HYST 3
+#define BATTERY_FULL_THRESHOLD_PERCENT 95
+#define BATTERY_LEDS 3
 
 extern uint8_t drive_by_rpm;
 extern char use_speed_control_loop;
@@ -147,6 +156,8 @@ static product_context_t product = {
     .dec_btn = { 0, 0 }
 };
 
+static LedAnimHandle_t led_anim;
+
 static Button_Handle_t ui_power_button = {
     .FilterTicks = UI_DEBOUNCE_TICKS,
     .LongPressTicks = UI_LONG_PRESS_TICKS,
@@ -191,8 +202,6 @@ static void ui_start_motor(void);
 static void ui_on_power_short_running(void);
 static void ui_stop_motor(void);
 static void ui_update_soc_and_leds(void);
-static void ui_drive_leds(uint8_t soc, uint8_t charging, uint8_t blink_on);
-static void ui_set_led(GPIO_TypeDef* port, uint16_t pin, uint8_t on);
 static void ui_on_power_short(void);
 static void ui_on_power_long(void);
 static void ui_on_inc_short(void);
@@ -208,6 +217,8 @@ static void ui_btn_dec_down(void);
 static void ui_btn_dec_up(void);
 static void ui_btn_dec_short(void);
 static uint8_t ui_read_charge_done(void);
+static int DisplayBatteryDischargeLevel(LedAnimHandle_t* this, int8_t battLevelPercent);
+static int DisplayBatteryChargeLevel(LedAnimHandle_t* this, int8_t chargeLevelPercent, bool charge_done);
 
 // __attribute__((weak)) void ui_on_power_short_running(void) { }
 __attribute__((weak)) void ui_on_increment_short_callback(void) { }
@@ -217,6 +228,7 @@ void ui_init(void)
 {
     ui_configure_gpio();
     GPIO_SetBits(UI_BAT_V_ON_PORT, UI_BAT_V_ON_PIN);
+    LED_ANIM_Init(&led_anim);
 
     drive_by_rpm = 1;
     use_speed_control_loop = 1;
@@ -284,6 +296,8 @@ static uint16_t breath_phase = 0;
 static uint8_t breath_dir = 1;
 static uint16_t mode_change_phase = 0;
 static uint16_t fade_phase = 0;
+static int battery_band_discharge = -1;
+static int battery_band_charge = -1;
 static void ui_debug_write(const char* msg);
 
 void ui_update(void)
@@ -360,6 +374,8 @@ void ui_update(void)
     product_state_step(product.charging_present, charge_done);
     charging_state_step(product.charging_present, charge_done);
     ui_update_u_light();
+
+    LED_Anim_Step(&led_anim);
 
     ui_diag_tick_accum++;
     if (ui_diag_tick_accum >= UI_TICK_HZ) {
@@ -621,6 +637,10 @@ static void ui_update_u_light(void)
         /* PRODUCT_POWER_ON handled by fade logic in state step. */
         break;
     }
+#if (BU01_PRODUCT == BU01_EXT)
+    /* Only the BU01_EXT variant has the dedicated U-light. */
+    LED_SetLevel(&led_anim, LED_U, u_light_level);
+#endif
 }
 
 void ui_light_tick_fast(void)
@@ -630,15 +650,52 @@ void ui_light_tick_fast(void)
     if (pwm_counter >= 100) {
         pwm_counter = 0;
     }
-    uint8_t on = (pwm_counter < u_light_level);
 
-    uint32_t mask_b = UI_LED1_PIN | UI_LED2_PIN | UI_LED_ORANGE_PIN;
-    if (on) {
-        GPIO_SetBits(UI_LED1_PORT, mask_b);
-        GPIO_SetBits(UI_LED3_PORT, UI_LED3_PIN);
-    } else {
-        GPIO_ResetBits(UI_LED1_PORT, mask_b);
-        GPIO_ResetBits(UI_LED3_PORT, UI_LED3_PIN);
+    uint32_t set_mask_b = 0;
+    uint32_t clr_mask_b = 0;
+    uint32_t set_mask_a = 0;
+    uint32_t clr_mask_a = 0;
+
+    struct {
+        GPIO_TypeDef* port;
+        uint16_t pin;
+        led_id_t id;
+    } map[] = {
+        { UI_LED1_PORT, UI_LED1_PIN, LED1 },
+        { UI_LED2_PORT, UI_LED2_PIN, LED2 },
+        { UI_LED3_PORT, UI_LED3_PIN, LED3 },
+        { UI_LED_ORANGE_PORT, UI_LED_ORANGE_PIN, LED_ORANGE },
+    };
+
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        uint8_t level = LED_GetBrightness(&led_anim, map[i].id);
+        uint8_t on = (pwm_counter < level);
+        if (map[i].port == GPIOB) {
+            if (on) {
+                set_mask_b |= map[i].pin;
+            } else {
+                clr_mask_b |= map[i].pin;
+            }
+        } else if (map[i].port == GPIOA) {
+            if (on) {
+                set_mask_a |= map[i].pin;
+            } else {
+                clr_mask_a |= map[i].pin;
+            }
+        }
+    }
+
+    if (set_mask_b) {
+        GPIO_SetBits(GPIOB, set_mask_b);
+    }
+    if (clr_mask_b) {
+        GPIO_ResetBits(GPIOB, clr_mask_b);
+    }
+    if (set_mask_a) {
+        GPIO_SetBits(GPIOA, set_mask_a);
+    }
+    if (clr_mask_a) {
+        GPIO_ResetBits(GPIOA, clr_mask_a);
     }
 }
 
@@ -955,6 +1012,145 @@ static void ui_stop_motor(void)
     ui_apply_target();
 }
 
+static int led_band_with_hyst(int last_band, uint8_t percent)
+{
+    const uint8_t t1 = BATTERY_LEVEL_LOW;
+    const uint8_t t2 = 40;
+    const uint8_t t3 = 70;
+    const uint8_t h  = BATTERY_LEVEL_HYST;
+
+    if (last_band < 0) {
+        if (percent < t1) return 0;
+        if (percent < t2) return 1;
+        if (percent < t3) return 2;
+        return 3;
+    }
+
+    switch (last_band) {
+    case 0:
+        if (percent >= t1 + h) last_band = 1;
+        break;
+    case 1:
+        if (percent >= t2 + h) last_band = 2;
+        else if (percent < t1 - h) last_band = 0;
+        break;
+    case 2:
+        if (percent >= t3 + h) last_band = 3;
+        else if (percent < t2 - h) last_band = 1;
+        break;
+    case 3:
+        if (percent < t3 - h) last_band = 2;
+        break;
+    default:
+        last_band = -1;
+        break;
+    }
+
+    if (last_band < 0) {
+        if (percent < t1) return 0;
+        if (percent < t2) return 1;
+        if (percent < t3) return 2;
+        return 3;
+    }
+    return last_band;
+}
+
+static int DisplayBatteryDischargeLevel(LedAnimHandle_t* this, int8_t battLevelPercent)
+{
+  if (!this || battLevelPercent == BATTERY_LEVEL_UNKNOWN)
+  {
+    return BATTERY_LEVEL_UNKNOWN;
+  }
+
+  int band = led_band_with_hyst(battery_band_discharge, (uint8_t)battLevelPercent);
+  battery_band_discharge = band;
+
+  switch (band)
+  {
+  case 0: /* critical */
+    LED_ANIM_PRINTF("Battery Critical: %d%%", battLevelPercent);
+    for (uint8_t i = 0; i < LED_COUNT; i++)
+    {
+      FadeOutLed(this, (led_id_t)i);
+    }
+    LED_Transition_ToBreath(&this->channels[LED_ORANGE], &LED_Animation_Breath, true);
+    this->flags.LedOrangeFlashEnable = true;
+    break;
+  case 1: /* low */
+    LED_ANIM_PRINTF("Battery Low: %d%%", battLevelPercent);
+    FadeInLed(this, LED1);
+    FadeOutLed(this, LED2);
+    FadeOutLed(this, LED3);
+    FadeOutLed(this, LED_ORANGE);
+    this->flags.LedOrangeFlashEnable = false;
+    break;
+  case 2: /* medium */
+    LED_ANIM_PRINTF("Battery Medium: %d%%", battLevelPercent);
+    FadeInLed(this, LED1);
+    FadeInLed(this, LED2);
+    FadeOutLed(this, LED3);
+    FadeOutLed(this, LED_ORANGE);
+    this->flags.LedOrangeFlashEnable = false;
+    break;
+  case 3: /* high */
+  default:
+    LED_ANIM_PRINTF("Battery High: %d%%", battLevelPercent);
+    for (uint8_t i = 0; i < BATTERY_LEDS; i++)
+    {
+      FadeInLed(this, (led_id_t)i);
+    }
+    FadeOutLed(this, LED_ORANGE);
+    this->flags.LedOrangeFlashEnable = false;
+    break;
+  }
+
+  return battLevelPercent;
+}
+
+static int DisplayBatteryChargeLevel(LedAnimHandle_t* this, int8_t chargeLevelPercent, bool charge_done)
+{
+  if (!this || chargeLevelPercent == BATTERY_LEVEL_UNKNOWN)
+  {
+    return BATTERY_LEVEL_UNKNOWN;
+  }
+
+  int band = led_band_with_hyst(battery_band_charge, (uint8_t)chargeLevelPercent);
+  battery_band_charge = band;
+
+  LED_ANIM_PRINTF("Charge Level: %d%% (done=%d)", chargeLevelPercent, charge_done ? 1 : 0);
+
+  /* Orange off while charging */
+  FadeOutLed(this, LED_ORANGE);
+
+  if (band == 0) {
+    LED_Transition_ToBreath(&this->channels[LED1], &LED_Animation_Breath, true);
+    FadeOutLed(this, LED2);
+    FadeOutLed(this, LED3);
+  } else if (band == 1) {
+    LED_Transition_ToSolid(&this->channels[LED1], &LED_Animation_Solid, true);
+    LED_Transition_ToBreath(&this->channels[LED2], &LED_Animation_Breath, true);
+    FadeOutLed(this, LED3);
+  } else if (band == 2) {
+    LED_Transition_ToSolid(&this->channels[LED1], &LED_Animation_Solid, true);
+    LED_Transition_ToSolid(&this->channels[LED2], &LED_Animation_Solid, true);
+    LED_Transition_ToBreath(&this->channels[LED3], &LED_Animation_Breath, true);
+  } else { /* band 3 */
+    if (!charge_done) {
+      LED_Transition_ToSolid(&this->channels[LED1], &LED_Animation_Solid, true);
+      LED_Transition_ToSolid(&this->channels[LED2], &LED_Animation_Solid, true);
+      LED_Transition_ToBreath(&this->channels[LED3], &LED_Animation_Breath, true);
+    } else {
+      for (uint8_t i = 0; i < BATTERY_LEDS; i++) {
+        LED_Transition_ToSolid(&this->channels[i], &LED_Animation_Solid, true);
+      }
+    }
+  }
+
+  FadeOutLed(this, LED_U);
+
+  return chargeLevelPercent;
+}
+
 static uint8_t ui_calculate_soc(uint16_t voltage_cV)
 {
     if (voltage_cV <= UI_SOC_MIN_CV) {
@@ -966,23 +1162,13 @@ static uint8_t ui_calculate_soc(uint16_t voltage_cV)
     return (uint8_t)map((long)voltage_cV, UI_SOC_MIN_CV, UI_SOC_MAX_CV, 0, 100);
 }
 
-static void ui_set_led(GPIO_TypeDef* port, uint16_t pin, uint8_t on)
-{
-    if (on) {
-        GPIO_SetBits(port, pin);
-    } else {
-        GPIO_ResetBits(port, pin);
-    }
-}
-
-static void ui_drive_leds(uint8_t soc, uint8_t charging, uint8_t blink_on)
-{
-    (void)soc;
-    (void)charging;
-    (void)blink_on;
-}
-
 static void ui_update_soc_and_leds(void)
 {
     product.soc = ui_calculate_soc(battery_voltage);
+    if (product.charging_state.Now == CHARGE_CHARGING || product.charging_state.Now == CHARGE_COMPLETE) {
+        battery_band_charge = DisplayBatteryChargeLevel(&led_anim, product.soc,
+                                                        product.charging_state.Now == CHARGE_COMPLETE);
+    } else {
+        battery_band_discharge = DisplayBatteryDischargeLevel(&led_anim, product.soc);
+    }
 }
