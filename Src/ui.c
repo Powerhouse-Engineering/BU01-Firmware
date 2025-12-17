@@ -472,9 +472,12 @@ static void product_state_step(bool charging_present, uint8_t charge_done)
               product_set_state(PRODUCT_STANDBY, 0);
               break;
           }
+
+          ui_set_target_rpm((product.level_index * 75 + 300)*CURRENT_GEAR_RATIO);
         }
         break;
 
+    /// TODO: remove this state. Put everything in product running 
     case PRODUCT_MODE_CHANGE:
         if (!product.state.Configured) {
             mode_change_phase = 0;
@@ -485,6 +488,8 @@ static void product_state_step(bool charging_present, uint8_t charge_done)
               product_set_state(PRODUCT_RUNNING, 0);
               break;
           }
+
+          ui_set_target_rpm((product.level_index * 75 + 300)*CURRENT_GEAR_RATIO);
         }
         break;
 
