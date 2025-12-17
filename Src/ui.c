@@ -311,18 +311,6 @@ void ui_update(void)
 
     product.last_tick_count = now;
 
-// #ifdef DEBUG_UART_ENABLE
-    if (DebugCount1 > 100)
-    {
-        DebugCount1 = 0;
-        ui_debug_write("UI alive\r\n");
-    }
-    else
-    {
-      DebugCount1++;
-    }
-// #endif
-
     signaltimeout = 0;
     inputSet = 1;
 
@@ -334,7 +322,7 @@ void ui_update(void)
         }
     }
 
-    uint8_t dc_in_raw = ui_read_button(UI_DC_IN_PORT, UI_DC_IN_PIN);
+    uint8_t dc_in_raw = GPIO_ReadInputDataBit(UI_DC_IN_PORT, UI_DC_IN_PIN) == Bit_SET;
     uint8_t charging_now = 
 #if UI_DC_IN_ACTIVE_HIGH
         dc_in_raw;
@@ -342,11 +330,33 @@ void ui_update(void)
         !dc_in_raw;
 #endif
     uint8_t charge_done = ui_read_charge_done();
-#ifdef DEBUG_UART_ENABLE
+
+#if defined(DEBUG_UART_ENABLE) && defined(DEBUG_UART_USE_USART1)
     product.charging_present = false; /* PB6 remap for UART clashes with charge sense; disable while logging. */
 #else
     product.charging_present = charging_now;
 #endif
+
+#ifdef DEBUG_UART_ENABLE
+    if (DebugCount1 > 100)
+    {
+        DebugCount1 = 0;
+        ui_debug_write("UI alive\r\n");
+        if (charging_now)
+        {
+          ui_debug_write("DC IN\r\n");
+        }
+        else
+        {
+          ui_debug_write("DC not IN\r\n");
+        }
+    }
+    else
+    {
+      DebugCount1++;
+    }
+#endif
+
     uint8_t power_pressed = ui_read_button(UI_POWER_BUTTON_PORT, UI_POWER_BUTTON_PIN);
     uint8_t inc_pressed = ui_read_button(UI_INC_BUTTON_PORT, UI_INC_BUTTON_PIN);
     uint8_t dec_pressed = ui_read_button(UI_DEC_BUTTON_PORT, UI_DEC_BUTTON_PIN);
@@ -822,7 +832,7 @@ static uint8_t ui_read_button(GPIO_TypeDef* port, uint16_t pin)
 
 static uint8_t ui_read_charge_done(void)
 {
-    uint8_t raw = ui_read_button(UI_CHG_DONE_PORT, UI_CHG_DONE_PIN);
+    uint8_t raw = GPIO_ReadInputDataBit(UI_CHG_DONE_PORT, UI_CHG_DONE_PIN) == Bit_SET;
 #if UI_CHG_DONE_ACTIVE_LOW
     return raw;
 #else
