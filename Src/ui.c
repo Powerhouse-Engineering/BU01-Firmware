@@ -7,54 +7,13 @@
 #include "functions.h"
 #include "led_anim.h"
 #include "config.h"
+#include "speed_sequence_data.h"
 #include "main.h"
 #include "targets.h"
 #include <stdio.h>
 #include <stddef.h>
 
-#define UI_BAT_V_ON_PORT GPIOB
-#define UI_BAT_V_ON_PIN GPIO_Pin_12
 
-#define UI_POWER_BUTTON_PORT GPIOB
-#define UI_POWER_BUTTON_PIN GPIO_Pin_7
-#define UI_INC_BUTTON_PORT GPIOB
-#define UI_INC_BUTTON_PIN GPIO_Pin_9
-#define UI_DEC_BUTTON_PORT GPIOA
-#define UI_DEC_BUTTON_PIN GPIO_Pin_11
-
-#define UI_LED1_PORT GPIOB // White
-#define UI_LED1_PIN GPIO_Pin_5
-#define UI_LED2_PORT GPIOB // White
-#define UI_LED2_PIN GPIO_Pin_3
-#define UI_LED3_PORT GPIOA // White
-#define UI_LED3_PIN GPIO_Pin_15
-#define UI_LED_ORANGE_PORT GPIOB
-#define UI_LED_ORANGE_PIN GPIO_Pin_4
-
-#define UI_DC_IN_PORT GPIOC
-#define UI_DC_IN_PIN GPIO_Pin_13
-#define UI_DC_IN_ACTIVE_HIGH 1
-#define UI_CHG_DONE_PORT GPIOA
-#define UI_CHG_DONE_PIN GPIO_Pin_12
-#define UI_CHG_DONE_ACTIVE_LOW 1
-
-#define UI_TICK_HZ 100U
-#define UI_TICK_INTERVAL (LOOP_FREQUENCY_HZ / UI_TICK_HZ)
-#define UI_DEBOUNCE_TICKS 3U
-#define UI_LONG_PRESS_TICKS 100U // 1 second at 100Hz
-#define UI_SHORT_PRESS_MAX_TICKS (UI_LONG_PRESS_TICKS - 1U)
-#define UI_SHUTDOWN_DELAY_TICKS UI_TICK_HZ // 1 second
-#define UI_SOC_UPDATE_TICKS (UI_TICK_HZ / 5U)
-#define UI_BLINK_PERIOD_TICKS (UI_TICK_HZ / 2U)
-#define UI_SOC_MIN_CV 330U  // 3.30V per cell shown as 330 (centivolts)
-#define UI_SOC_MAX_CV 420U  // 4.20V per cell shown as 420 (centivolts)
-#define UI_RPM_STEP 600U
-
-#define BATTERY_LEVEL_UNKNOWN 0xFF
-#define BATTERY_LEVEL_LOW 20
-#define BATTERY_LEVEL_HYST 3
-#define BATTERY_FULL_THRESHOLD_PERCENT 95
-#define BATTERY_LEDS 3
 
 extern uint8_t drive_by_rpm;
 extern char use_speed_control_loop;
@@ -116,6 +75,8 @@ typedef struct {
     bool charging_present;
     uint8_t soc;
     uint8_t blink_on;
+    uint8_t mode_index;
+    uint8_t level_index;
     uint16_t target_input;
     uint32_t target_rpm;
     uint32_t last_nonzero_rpm;
@@ -136,6 +97,8 @@ static product_context_t product = {
     .charging_present = false,
     .soc = 0,
     .blink_on = 0,
+    .mode_index = 0,
+    .level_index = 0,
     .target_input = 0,
     .target_rpm = 0,
     .last_nonzero_rpm = 0,
@@ -196,10 +159,13 @@ static void charging_state_step(bool charging_present, uint8_t charge_done);
 static void product_set_state(product_state_t next, uint32_t counter);
 static void charging_set_state(charging_state_t next, uint32_t counter);
 static void ui_update_u_light(void);
+static void ui_cycle_mode(void);
+static void ui_change_level(int8_t delta);
+static void ui_on_mode_or_level_changed(void);
+static void ui_prepare_speed_sequence_request(void);
 static uint16_t ui_rpm_to_input(uint32_t rpm);
 static void ui_apply_target(void);
 static void ui_start_motor(void);
-static void ui_on_power_short_running(void);
 static void ui_stop_motor(void);
 static void ui_update_soc_and_leds(void);
 static void ui_on_power_short(void);
@@ -220,7 +186,6 @@ static uint8_t ui_read_charge_done(void);
 static int DisplayBatteryDischargeLevel(LedAnimHandle_t* this, int8_t battLevelPercent);
 static int DisplayBatteryChargeLevel(LedAnimHandle_t* this, int8_t chargeLevelPercent, bool charge_done);
 
-// __attribute__((weak)) void ui_on_power_short_running(void) { }
 __attribute__((weak)) void ui_on_increment_short_callback(void) { }
 __attribute__((weak)) void ui_on_decrement_short_callback(void) { }
 
@@ -249,6 +214,8 @@ void ui_init(void)
     product.target_input = 0;
     product.shutdown_ticks = 0;
     product.last_tick_count = tenkhzcounter;
+    product.mode_index = (UI_DEFAULT_MODE_INDEX < NUM_MODES) ? UI_DEFAULT_MODE_INDEX : 0U;
+    product.level_index = (UI_DEFAULT_LEVEL_INDEX < NUM_GEARS) ? UI_DEFAULT_LEVEL_INDEX : 0U;
     product_set_state(PRODUCT_POWER_ON, 0);
     charging_set_state(CHARGE_NONE, 0);
 
@@ -721,6 +688,70 @@ static void ui_debug_write(const char* msg)
 #endif
 }
 
+static void ui_prepare_speed_sequence_request(void)
+{
+    const SpeedSeq_Step_t *steps = NULL;
+    uint8_t num_steps = 0;
+    uint32_t repeat = 0;
+
+    if (!SpeedSeq_GetModeGearData(product.mode_index, product.level_index, &steps, &num_steps, &repeat)) {
+        ui_debug_write("SpeedSeq lookup failed\r\n");
+        return;
+    }
+
+    char buf[120];
+    int n = snprintf(buf, sizeof(buf),
+                     "mode=%u/%u level=%u/%u steps=%u repeat=%lu\r\n",
+                     (unsigned)(product.mode_index + 1U),
+                     (unsigned)NUM_MODES,
+                     (unsigned)(product.level_index + 1U),
+                     (unsigned)NUM_GEARS,
+                     (unsigned)num_steps,
+                     (unsigned long)repeat);
+    if (n > 0) {
+        buf[sizeof(buf) - 1] = '\0';
+        debug_uart_write(buf);
+    }
+
+    /* TODO: hook this into the speed sequence driver when available. */
+}
+
+static void ui_on_mode_or_level_changed(void)
+{
+    product_set_state(PRODUCT_MODE_CHANGE, 0);
+    ui_prepare_speed_sequence_request();
+}
+
+static void ui_cycle_mode(void)
+{
+    if (NUM_MODES == 0U) {
+        return;
+    }
+
+    product.mode_index = (uint8_t)((product.mode_index + 1U) % NUM_MODES);
+    ui_on_mode_or_level_changed();
+}
+
+static void ui_change_level(int8_t delta)
+{
+    if (NUM_GEARS == 0U) {
+        return;
+    }
+
+    uint8_t next_level = product.level_index;
+
+    if ((delta > 0) && ((next_level + 1U) < NUM_GEARS)) {
+        next_level++;
+    } else if ((delta < 0) && (next_level > 0U)) {
+        next_level--;
+    }
+
+    if (next_level != product.level_index) {
+        product.level_index = next_level;
+        ui_on_mode_or_level_changed();
+    }
+}
+
 static void ui_on_power_short(void)
 {
   debug_uart_write("ButtonPower Short Press\r\n");
@@ -734,11 +765,10 @@ static void ui_on_power_short(void)
     if (!product.motor_requested) {
         ui_start_motor();
         product_set_state(PRODUCT_RUNNING, 0);
-    } else {
-        product.motor_requested = 0;
-        product_set_state(PRODUCT_STANDBY, 0);
-        ui_on_power_short_running();
+        return;
     }
+
+    ui_cycle_mode();
 }
 
 static void ui_on_power_long(void)
@@ -766,9 +796,8 @@ static void ui_on_inc_short(void)
         return;
     }
     if (product.motor_requested || running) {
-        ui_set_target_rpm(product.target_rpm + UI_RPM_STEP);
+        ui_change_level(1);
         ui_on_increment_short_callback();
-        product_set_state(PRODUCT_MODE_CHANGE, 0);
     }
 }
 
@@ -780,13 +809,8 @@ static void ui_on_dec_short(void)
         return;
     }
     if (product.motor_requested || running) {
-        if (product.target_rpm > UI_RPM_STEP) {
-            ui_set_target_rpm(product.target_rpm - UI_RPM_STEP);
-        } else {
-            ui_set_target_rpm(0);
-        }
+        ui_change_level(-1);
         ui_on_decrement_short_callback();
-        product_set_state(PRODUCT_MODE_CHANGE, 0);
     }
 }
 
@@ -869,14 +893,16 @@ static void ui_log_context(void)
 {
     char buf[180];
     int n = snprintf(buf, sizeof(buf),
-                     "UI product: dev=%u motor_req=%u charging=%u chg_state=%u soc=%u tgt_in=%u state=%u \r\n",
+                     "UI product: dev=%u motor_req=%u charging=%u chg_state=%u soc=%u tgt_in=%u state=%u mode=%u level=%u \r\n",
                      (unsigned)product.device_on,
                      (unsigned)product.motor_requested,
                      (unsigned)product.charging_present,
                      (unsigned)product.charging_state.Now,
                      (unsigned)product.soc,
                      (unsigned)product.target_input,
-                     (unsigned)product.state.Now);
+                     (unsigned)product.state.Now,
+                     (unsigned)(product.mode_index + 1U),
+                     (unsigned)(product.level_index + 1U));
     if (n > 0) {
         buf[sizeof(buf) - 1] = '\0';
         debug_uart_write(buf);
@@ -1008,11 +1034,6 @@ static void ui_start_motor(void)
     product.motor_requested = 1;
     debug_uart_write("motor_start\r\n");
     ui_apply_target();
-}
-
-static void ui_on_power_short_running(void)
-{
-    ui_stop_motor();
 }
 
 static void ui_stop_motor(void)

@@ -1,11 +1,13 @@
 #include "speed_sequence_data.h"
 #include "speed_sequence_config.h"
 #include "parameter_conversion.h"
-#include "p_parameters.h"
+#include "ui.h"
 
 /* We now still have 6 modes, but only 4 gears */
 #define NUM_MODES 6
 #define NUM_GEARS 4
+
+#define PRODUCT_TASK_FREQUENCY (UI_TICK_HZ) /*  */
 
 /***********************************************************
  * Mode 0: Fixed Speed
@@ -892,3 +894,26 @@ const uint8_t SpeedSeq_ModeGearNumSteps[NUM_MODES][NUM_GEARS] =
     /* Mode 5 */
     {M5_NUM_STEPS, M5_NUM_STEPS, M5_NUM_STEPS, M5_NUM_STEPS}
 };
+
+bool SpeedSeq_GetModeGearData(uint8_t mode,
+                              uint8_t gear,
+                              const SpeedSeq_Step_t **steps,
+                              uint8_t *num_steps,
+                              uint32_t *repeat)
+{
+    if ((steps == NULL) || (num_steps == NULL) || (repeat == NULL))
+    {
+        return false;
+    }
+
+    if ((mode >= NUM_MODES) || (gear >= NUM_GEARS))
+    {
+        return false;
+    }
+
+    *steps = SpeedSeq_ModeGearSteps[mode][gear];
+    *num_steps = SpeedSeq_ModeGearNumSteps[mode][gear];
+    *repeat = SpeedSeq_ModeRepeat[mode];
+
+    return true;
+}
