@@ -14,28 +14,25 @@
 /****************************************************************************
  * Default Speeds for each gear
  ****************************************************************************/
-#define GX_SAFE_AMPLITUDE (1000) /* Example amplitude */
+#define RPM_TO_10RPM_CONVERSION_FACTOR (10U) /* Or S16 values */
 
-#ifdef COMPENSATE_MISSED_HF_INTERRUPTS
-#define G0_DEFAULT_SPEED_RPM (266U * 12 / 8) /* Measurements: with set up 600, 700, 800 900, gives:
+#define GX_SAFE_AMPLITUDE (25 * RPM_TO_10RPM_CONVERSION_FACTOR) /* Example amplitude */
+
+
+#define G0_DEFAULT_SPEED_RPM (315U) /* Measurements: with set up 600, 700, 800 900, gives:
                                         300, 360, 410, 470. */
-#define G1_DEFAULT_SPEED_RPM (300U * 12 / 8)
-#define G2_DEFAULT_SPEED_RPM (333U * 12 / 8)
-#define G3_DEFAULT_SPEED_RPM (366U * 12 / 8)
+#define G1_DEFAULT_SPEED_RPM (356U)
+#define G2_DEFAULT_SPEED_RPM (395U)
+#define G3_DEFAULT_SPEED_RPM (434U)
 
 /*4200 = 280, 4600 = 318, 5000 = 345, 5500 = 380 (with 1:16)*/
   /* With 1:19, 6875 = 400,  */
   /* Equation for 1:16 ----> 13.39 x rpm + 401.76 = RPM_S16 */
-#define G0_DEFAULT_SPEED_S16 ((uint16_t)((24.0f * (float)G0_DEFAULT_SPEED_RPM + 1200.0 ) * CURRENT_GEAR_RATIO / OLD_GEAR_RATIO))
-#define G1_DEFAULT_SPEED_S16 ((uint16_t)((24.0f * (float)G1_DEFAULT_SPEED_RPM + 1200.0 ) * CURRENT_GEAR_RATIO / OLD_GEAR_RATIO))
-#define G2_DEFAULT_SPEED_S16 ((uint16_t)((24.0f * (float)G2_DEFAULT_SPEED_RPM + 1200.0 ) * CURRENT_GEAR_RATIO / OLD_GEAR_RATIO))
-#define G3_DEFAULT_SPEED_S16 ((uint16_t)((24.0f * (float)G3_DEFAULT_SPEED_RPM + 1200.0 ) * CURRENT_GEAR_RATIO / OLD_GEAR_RATIO))
-#else
-    #define G0_DEFAULT_SPEED_S16 (13000)
-    #define G1_DEFAULT_SPEED_S16 (15166)
-    #define G2_DEFAULT_SPEED_S16 (17332)
-    #define G3_DEFAULT_SPEED_S16 (19500)
-#endif
+#define G0_DEFAULT_SPEED_S16 (uint16_t) (G0_DEFAULT_SPEED_RPM * RPM_TO_10RPM_CONVERSION_FACTOR)
+#define G1_DEFAULT_SPEED_S16 (uint16_t) (G1_DEFAULT_SPEED_RPM * RPM_TO_10RPM_CONVERSION_FACTOR)
+#define G2_DEFAULT_SPEED_S16 (uint16_t) (G2_DEFAULT_SPEED_RPM * RPM_TO_10RPM_CONVERSION_FACTOR)
+#define G3_DEFAULT_SPEED_S16 (uint16_t) (G3_DEFAULT_SPEED_RPM * RPM_TO_10RPM_CONVERSION_FACTOR)
+
 
 /* With only 4 gears, we no longer define G4_DEFAULT_SPEED_S16, G5_DEFAULT_SPEED_S16 */
 #define MIN_LEVEL_S16 (G0_DEFAULT_SPEED_S16 - 2 * GX_SAFE_AMPLITUDE)
