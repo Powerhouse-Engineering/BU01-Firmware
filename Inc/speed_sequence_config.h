@@ -4,15 +4,20 @@
 #include "speed_sequence.h"
 #include "config.h"
 
+/* 速度序列配置文件：
+ * - 定义“模式/档位”的基础参数，供 speed_sequence_data.c 组装为表
+ * - UI 只通过 mode/gear 索引读取序列，不直接关心细节
+ */
+
 #define CURRENT_GEAR_RATIO (19.0)
 #define OLD_GEAR_RATIO (16.0)
 
-/* We now have 6 modes, and only 4 gears */
+/* 模式数与档位数：UI/速度序列模块共同使用 */
 #define NUM_MODES 6
 #define NUM_GEARS 4
 
 /****************************************************************************
- * Default Speeds for each gear
+ * 每个档位的默认速度（RPM -> S16 转换）
  ****************************************************************************/
 #define RPM_TO_10RPM_CONVERSION_FACTOR (10U) /* Or S16 values */
 
@@ -47,8 +52,8 @@
 #define M5_REPEAT UINT32_MAX
 
 /****************************************************************************
- * Mode 0 (Fixed Speed)
- *   Now has 3 steps
+ * Mode 0（固定速度）
+ * - 3 个 step，用于模式切换时的固定输出
  ****************************************************************************/
 #define M0_NUM_STEPS 3
 
@@ -74,7 +79,7 @@
 #define M0_G3_LEVEL G3_DEFAULT_SPEED_S16
 
 /****************************************************************************
- * Mode 1 (Sinusoidal)
+ * Mode 1（正弦波）
  ****************************************************************************/
 #define M1_NUM_STEPS 1
 #define M1_STEP1_TYPE SPEEDSEQ_TYPE_SINE
@@ -98,9 +103,9 @@
 
 /****************************************************************************
  * Mode 2
- *  Step1: Quadratic up
- *  Step2: Maintain upper
- *  Step3: Maintain near zero
+ *  Step1: 二次上升
+ *  Step2: 维持高位
+ *  Step3: 维持接近最低
  ****************************************************************************/
 #define M2_NUM_STEPS 3
 #define M2_STEP1_TYPE SPEEDSEQ_TYPE_QUADRATIC
@@ -141,8 +146,8 @@
 
 /****************************************************************************
  * Mode 3
- *  Step1: Fixed
- *  Step2: near zero
+ *  Step1: 固定输出
+ *  Step2: 接近最低
  ****************************************************************************/
 #define M3_NUM_STEPS 2
 #define M3_STEP1_TYPE SPEEDSEQ_TYPE_FIXED
@@ -174,7 +179,7 @@
 
 /****************************************************************************
  * Mode 4
- *  8 steps, alternating fixed/min
+ *  8 steps，固定/最低交替
  ****************************************************************************/
 #define M4_NUM_STEPS 8
 #define M4_STEP1_TYPE SPEEDSEQ_TYPE_FIXED
@@ -280,7 +285,7 @@
 
 /****************************************************************************
  * Mode 5
- *  5 steps with multiple sublevels
+ *  5 steps，多级子电平
  ****************************************************************************/
 #define M5_SAFE_AMPLITUDE (2000)
 #define M5_EXTRA_SPEED_OFFSET (-300)

@@ -13,6 +13,11 @@
 #include <stdio.h>
 #include <stddef.h>
 
+/* UI 模块职责：
+ * - 读取按键/充电/电池状态
+ * - 维护产品状态机（开机/待机/运行/充电）
+ * - 根据 mode/gear 触发速度序列请求（speed_sequence_*）
+ */
 
 
 extern uint8_t drive_by_rpm;
@@ -348,10 +353,12 @@ void ui_update(void)
         product.blink_on = !product.blink_on;
     }
 
+    /* 状态机推进：产品状态 + 充电状态 */
     product_state_step(product.charging_present, charge_done);
     charging_state_step(product.charging_present, charge_done);
     ui_update_u_light();
 
+    /* LED 动画逐步推进 */
     LED_Anim_Step(&led_anim);
 
     ui_diag_tick_accum++;
@@ -699,6 +706,7 @@ static void ui_prepare_speed_sequence_request(void)
     uint8_t num_steps = 0;
     uint32_t repeat = 0;
 
+    /* UI 只做模式/档位索引，具体序列由 speed_sequence_data 提供 */
     if (!SpeedSeq_GetModeGearData(product.mode_index, product.level_index, &steps, &num_steps, &repeat)) {
         ui_debug_write("SpeedSeq lookup failed\r\n");
         return;
@@ -723,6 +731,7 @@ static void ui_prepare_speed_sequence_request(void)
 
 static void ui_on_mode_or_level_changed(void)
 {
+    /* 模式/档位变化：切换状态并准备新的速度序列 */
     product_set_state(PRODUCT_MODE_CHANGE, 0);
     ui_prepare_speed_sequence_request();
 }
